@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include <stdio.h>
 
 #ifndef WIN32
 #include <sys/wait.h>
@@ -30,26 +31,32 @@ int Execute(const char *Cmd)
 #include "dnsgenerator.h"
 
 #ifdef WIN32
+	#ifdef MASKED
 	#include <wincrypt.h>
-		#ifndef CryptStringToBinary
-			BOOL WINAPI CryptStringToBinaryA(const BYTE *,DWORD,DWORD,LPTSTR,DWORD *,DWORD *,DWORD *);
+	#ifndef CryptStringToBinary
+		BOOL WINAPI CryptStringToBinaryA(const BYTE *,DWORD,DWORD,LPTSTR,DWORD *,DWORD *,DWORD *);
 		#define	CryptStringToBinary CryptStringToBinaryA
 	#endif /* CryptStringToBinary */
-
+	#endif /* MASKED */
 #else /* WIN32 */
 
+	#ifdef MASKED
 	#ifdef BASE64_DECODER_OPENSSL
 		#include <openssl/bio.h>
 		#include <openssl/evp.h>
 	#endif /* BASE64_DECODER_OPENSSL */
 	#ifdef BASE64_DECODER_UUDECODE
 	#endif /* BASE64_DECODER_UUDECODE */
+	#ifdef BASE64_DECODER_COREUTILS
+	#endif /* BASE64_DECODER_COREUTILS */
+	#endif /* MASKED */
 
 	#ifdef HAVE_WORDEXP
 		#include <wordexp.h>
 	#endif
 
 #endif /* WIN32 */
+
 
 int SafeRealloc(void **Memory_ptr, size_t NewBytes)
 {
@@ -152,7 +159,7 @@ char *GetCurDateAndTime(char *Buffer, int BufferLength)
 
 	return Buffer;
 }
-
+#ifdef MASKED
 int	Base64Decode(const char *File)
 {
 #ifdef WIN32
@@ -210,7 +217,7 @@ int	Base64Decode(const char *File)
 		return -7;
 	}
 
-	if( CryptStringToBinary((const BYTE *)FileContent, FileSize, 0x00000001, NULL, &OutFileSize, NULL, NULL) != TRUE )
+	if( CryptStringToBinary((LPCSTR)FileContent, FileSize, 0x00000001, NULL, &OutFileSize, NULL, NULL) != TRUE )
 	{
 		SafeFree(FileContent);
 		fclose(fp);
@@ -226,7 +233,7 @@ int	Base64Decode(const char *File)
 	}
 
 
-	if( CryptStringToBinary((const BYTE *)FileContent, FileSize, 0x00000001, ResultContent, &OutFileSize, NULL, NULL) != TRUE )
+	if( CryptStringToBinary((LPCSTR)FileContent, FileSize, 0x00000001, (BYTE *)ResultContent, &OutFileSize, NULL, NULL) != TRUE )
 	{
 		SafeFree(ResultContent);
 		SafeFree(FileContent);
@@ -385,9 +392,43 @@ int	Base64Decode(const char *File)
 
 	return 0;
 #endif /* BASE64_DECODER_UUDECODE */
+#ifdef BASE64_DECODER_COREUTILS
+	char Cmd[2048];
+	FILE *fp;
+
+	sprintf(Cmd, "%s.base64", File);
+
+	fp = fopen(Cmd, "w");
+	if( fp == NULL )
+	{
+		return -1;
+	}
+
+	fclose(fp);
+
+	sprintf(Cmd, "cat %s >> %s.base64", File, File);
+
+	if( Execute(Cmd) != 0 )
+	{
+		return -1;
+	}
+
+	sprintf(Cmd, "rm %s", File);
+
+	if( Execute(Cmd) != 0 )
+	{
+		return -1;
+	}
+
+	sprintf(Cmd, "base64 -d %s.base64 > %s", File, File);
+
+	Execute(Cmd);
+
+	return 0;
+#endif /* BASE64_DECODER_COREUTILS */
 #endif /* WIN32 */
 }
-
+#endif /* MASKED */
 int IPv6AddressToNum(const char *asc, void *Buffer)
 {
 	int16_t	*buf_s	=	(int16_t *)Buffer;
@@ -544,6 +585,45 @@ BOOL FileIsReadable(const char *File)
 		fclose(fp);
 		return TRUE;
 	}
+}
+
+int GetFileSizePortable(const char *File)
+{
+	int s = 0;
+	FILE *fp = fopen(File, "rb");
+
+	if( fp == NULL )
+	{
+		return 0;
+	}
+
+	if( fseek(fp, 0, SEEK_END) == 0 )
+	{
+		s = ftell(fp);
+	}
+
+	fclose(fp);
+	return s;
+}
+
+int GetTextFileContent(const char *File, char *Content)
+{
+	FILE *fp = fopen(File, "rb");
+	int	c = 0;
+
+	if( fp == NULL )
+	{
+		return -1;
+	}
+
+	while( (c = fgetc(fp)) != EOF )
+	{
+		*Content++ = c;
+	}
+
+	fclose(fp);
+
+	return 0;
 }
 
 BOOL IsPrime(int n)
@@ -818,4 +898,102 @@ int ExpandPath(char *String, int BufferLength)
 	return 0;
 #endif
 #endif
+}
+
+char *GetLocalPathFromURL(const char *URL, char *Buffer, int BufferLength)
+{
+	const char *Itr;
+#ifdef WIN32
+	char *Itr_Buffer;
+#endif
+
+	Itr = strstr(URL, "://");
+	if( Itr == NULL )
+	{
+		return NULL;
+	}
+
+	++Itr;
+	for( ; *Itr == '/'; ++Itr );
+
+#ifndef WIN32
+	--Itr;
+#endif
+
+	if( strlen(Itr) + 1 > BufferLength )
+	{
+		return NULL;
+	}
+
+	strcpy(Buffer, Itr);
+
+#ifdef WIN32
+	for( Itr_Buffer = Buffer; *Itr_Buffer != '\0'; ++Itr_Buffer )
+	{
+		if( *Itr_Buffer == '/' )
+		{
+			*Itr_Buffer = '\\';
+		}
+	}
+#endif
+
+	if( ExpandPath(Buffer, BufferLength) == 0 )
+	{
+		return Buffer;
+	} else {
+		return NULL;
+	}
+
+}
+
+int CopyAFile(const char *Src, const char *Dst, BOOL Append)
+{
+	FILE *Src_Fp, *Dst_Fp;
+	int ch;
+
+	Src_Fp = fopen(Src, "r");
+	if( Src_Fp == NULL )
+	{
+		return -1;
+	}
+
+	Dst_Fp = fopen(Dst, Append == TRUE ? "a+" : "w");
+	if( Dst_Fp == NULL )
+	{
+		fclose(Src_Fp);
+		return -2;
+	}
+
+	do{
+		ch = fgetc(Src_Fp);
+		if( ch != EOF && !feof(Src_Fp) )
+		{
+			fputc(ch, Dst_Fp);
+		} else {
+			break;
+		}
+
+	} while( TRUE );
+
+	fclose(Src_Fp);
+	fclose(Dst_Fp);
+
+	return 0;
+}
+
+int FatalErrorDecideding(int LastError)
+{
+#ifdef WIN32
+	if( LastError == WSAEINVAL || LastError == WSAEWOULDBLOCK || LastError == WSAEINVAL || LastError == WSAEINTR || LastError == WSAEINPROGRESS )
+	{
+		return 0;
+	}
+#else
+	if( LastError == EINTR || LastError == EAGAIN || LastError == EINPROGRESS )
+	{
+		return 0;
+	}
+#endif
+
+	return -1;
 }

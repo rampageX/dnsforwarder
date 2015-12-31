@@ -54,17 +54,23 @@ int QueryDNSListenTCPInit(ConfigFileInfo *ConfigInfo)
 static int Query(char *Content, int ContentLength, int BufferLength, SOCKET ThisSocket)
 {
 	int State;
-	uint16_t TCPLength = htons(ContentLength - sizeof(ControlHeader));
-
-	ControlHeader	*Header = (ControlHeader *)Content;
-
 	char *RequestEntity = Content + sizeof(ControlHeader);
+	ControlHeader	*Header = (ControlHeader *)Content;
+	int RequestLength = ContentLength - sizeof(ControlHeader);
+	uint16_t TCPLength = htons(RequestLength);
 
 	Header -> RequestingDomain[0] = '\0';
-	DNSGetHostName(RequestEntity,
-				   DNSJumpHeader(RequestEntity),
-				   Header -> RequestingDomain
-				   );
+
+	if( DNSGetHostName(RequestEntity,
+						RequestLength,
+						DNSJumpHeader(RequestEntity),
+						Header -> RequestingDomain,
+						sizeof(Header -> RequestingDomain)
+						)
+		< 0 )
+	{
+		return -1;
+	}
 
 	StrToLower(Header -> RequestingDomain);
 
@@ -77,7 +83,7 @@ static int Query(char *Content, int ContentLength, int BufferLength, SOCKET This
 
 	switch( State )
 	{
-		case QUERY_RESULT_SUCESS:
+		case QUERY_RESULT_SUCCESS:
 			InternalInterface_QueryContextAddTCP(&Context, Header, ThisSocket);
 			return 0;
 			break;
@@ -87,7 +93,7 @@ static int Query(char *Content, int ContentLength, int BufferLength, SOCKET This
 			((DNSHeader *)(RequestEntity)) -> Flags.RecursionAvailable = 1;
 			((DNSHeader *)(RequestEntity)) -> Flags.ResponseCode = RefusingResponseCode;
 			send(ThisSocket, (const char *)&TCPLength, 2, 0);
-			send(ThisSocket, RequestEntity, ContentLength - sizeof(ControlHeader), 0);
+			send(ThisSocket, RequestEntity, RequestLength, 0);
 			return -1;
 			break;
 
@@ -122,7 +128,7 @@ static int SocketInfoCompare(const SocketInfo *_1, const SocketInfo *_2)
 
 static int InitSocketInfo(void)
 {
-	return Bst_Init(&si, NULL, sizeof(SocketInfo), SocketInfoCompare);
+	return Bst_Init(&si, NULL, sizeof(SocketInfo), (int (*)(const void *, const void *))SocketInfoCompare);
 }
 
 static SOCKET SocketInfoMatch(fd_set *ReadySet, fd_set *ReadSet, char *ClientAddress, int32_t *Number)
@@ -230,7 +236,7 @@ static int QueryDNSListenTCP(void)
 	int		NumberOfQueryBeforeSwep = 0;
 
 	static const struct timeval	LongTime = {3600, 0};
-	static const struct timeval	ShortTime = {2, 0};
+	static const struct timeval	ShortTime = {10, 0};
 
 	struct timeval	TimeLimit = LongTime;
 
@@ -257,9 +263,16 @@ static int QueryDNSListenTCP(void)
 		switch( select(MaxFd + 1, &ReadySet, NULL, NULL, &TimeLimit) )
 		{
 			case SOCKET_ERROR:
-				ERRORMSG("\n\n\n\n\n\n\n\n\n\n");
-				ERRORMSG(" !!!!! Something bad happend, please restert this program.\n");
-				while( TRUE ) SLEEP(100000);
+				{
+					int LastError = GET_LAST_ERROR();
+					ERRORMSG("SOCKET_ERROR Reached, 1.\n");
+					if( FatalErrorDecideding(LastError) != 0 )
+					{
+						ERRORMSG("\n\n\n\n\n\n\n\n\n\n");
+						ERRORMSG(" !!!!! Something bad happend, please restart this program. %d\n", LastError);
+						while( TRUE ) SLEEP(100000);
+					}
+				}
 				break;
 
 			case 0:
@@ -268,7 +281,7 @@ static int QueryDNSListenTCP(void)
 					Bst_Reset(&Context);
 					TimeLimit = LongTime;
 				} else {
-					InternalInterface_QueryContextSwep(&Context, 2, NULL);
+					InternalInterface_QueryContextSwep(&Context, 10, NULL);
 					TimeLimit = ShortTime;
 				}
 
@@ -317,7 +330,7 @@ static int QueryDNSListenTCP(void)
 						{
 							strcpy(AddressString, inet_ntoa(Address.Addr.Addr4.sin_addr));
 						} else {
-							IPv6AddressToAsc(&Address, AddressString);
+							IPv6AddressToAsc(&(Address.Addr.Addr6.sin6_addr), AddressString);
 						}
 
 						if( NewSocket > MaxFd )

@@ -11,11 +11,12 @@
 #include "internalsocket.h"
 #include "rwlock.h"
 
-static BOOL			Internet = FALSE;
 static BOOL			StaticHostsInited = FALSE;
 
 static int			UpdateInterval;
-static time_t		LastUpdate = 0;
+static int			HostsRetryInterval;
+
+static BOOL			DisableIpv6WhenIpv4Exists = FALSE;
 
 static const char 	*File = NULL;
 
@@ -53,6 +54,7 @@ static int DynamicHosts_Load(void)
 	TempContainer = (HostsContainer *)SafeMalloc(sizeof(HostsContainer));
 	if( TempContainer == NULL )
 	{
+		fclose(fp);
 		return -1;
 	}
 
@@ -88,6 +90,11 @@ static int DynamicHosts_Load(void)
 				++ExcludedCount;
 				break;
 
+			case HOSTS_TYPE_CNAME_EXCLUEDE:
+				++CNameCount;
+				++ExcludedCount;
+				break;
+
 			default:
 				break;
 		}
@@ -115,96 +122,39 @@ static int DynamicHosts_Load(void)
 		CNameCount,
 		ExcludedCount);
 
+	fclose(fp);
 	return 0;
 }
 
-static BOOL NeedReload(void)
+static void GetHostsFromInternet_Failed(int ErrorCode, const char *URL, const char *File)
 {
-	if( File == NULL )
-	{
-		return FALSE;
-	}
-
-	if( time(NULL) - LastUpdate > UpdateInterval )
-	{
-
-#ifdef WIN32
-
-		static FILETIME	LastFileTime = {0, 0};
-		WIN32_FIND_DATA	Finddata;
-		HANDLE			Handle;
-
-		Handle = FindFirstFile(File, &Finddata);
-
-		if( Handle == INVALID_HANDLE_VALUE )
-		{
-			return FALSE;
-		}
-
-		if( memcmp(&LastFileTime, &(Finddata.ftLastWriteTime), sizeof(FILETIME)) != 0 )
-		{
-			LastUpdate = time(NULL);
-			LastFileTime = Finddata.ftLastWriteTime;
-			FindClose(Handle);
-			return TRUE;
-		} else {
-			LastUpdate = time(NULL);
-			FindClose(Handle);
-			return FALSE;
-		}
-
-#else /* WIN32 */
-		static time_t	LastFileTime = 0;
-		struct stat		FileStat;
-
-		if( stat(File, &FileStat) != 0 )
-		{
-
-			return FALSE;
-		}
-
-		if( LastFileTime != FileStat.st_mtime )
-		{
-			LastUpdate = time(NULL);
-			LastFileTime = FileStat.st_mtime;
-
-			return TRUE;
-		} else {
-			LastUpdate = time(NULL);
-
-			return FALSE;
-		}
-
-#endif /* WIN32 */
-	} else {
-		return FALSE;
-	}
+	ERRORMSG("Getting Hosts %s failed. Waiting %d second(s) to try again.\n", URL, HostsRetryInterval);
 }
 
-static int TryLoadHosts(void)
+static void GetHostsFromInternet_Succeed(const char *URL, const char *File)
 {
-	if( NeedReload() == TRUE )
-	{
-		ThreadHandle t = INVALID_THREAD;
-		CREATE_THREAD(DynamicHosts_Load, NULL, t);
-		DETACH_THREAD(t);
-	}
-	return 0;
+	INFO("Hosts %s saved.\n", URL);
 }
 
 static void GetHostsFromInternet_Thread(ConfigFileInfo *ConfigInfo)
 {
-	const char *URL = ConfigGetRawString(ConfigInfo, "Hosts");
-	const char *Script = ConfigGetRawString(ConfigInfo, "HostsScript");
-	int			HostsRetryInterval = ConfigGetInt32(ConfigInfo, "HostsRetryInterval");
+	const char	*Script = ConfigGetRawString(ConfigInfo, "HostsScript");
 	int			DownloadState;
+	const char	**URLs;
+
+	URLs = StringList_ToCharPtrArray(ConfigGetStringList(ConfigInfo, "Hosts"));
 
 	while(1)
 	{
 
-		INFO("Getting Hosts From %s ...\n", URL);
+		if( URLs[1] == NULL )
+		{
+			INFO("Getting hosts from %s ...\n", URLs[0]);
+		} else {
+			INFO("Getting hosts from various places ...\n");
+		}
 
-		DownloadState = GetFromInternet(URL, File);
+		DownloadState = GetFromInternet_MultiFiles(URLs, File, HostsRetryInterval, -1, GetHostsFromInternet_Failed, GetHostsFromInternet_Succeed);
 		if( DownloadState == 0 )
 		{
 			INFO("Hosts saved at %s.\n", File);
@@ -219,16 +169,16 @@ static void GetHostsFromInternet_Thread(ConfigFileInfo *ConfigInfo)
 
 			if( UpdateInterval < 0 )
 			{
-				return;
+				break;
 			}
-
-			SLEEP(UpdateInterval * 1000);
-
 		} else {
-			ERRORMSG("Getting Hosts from Internet failed : %d. Waiting %d second(s) to try again.\n", (-1) * DownloadState, HostsRetryInterval);
-			SLEEP(HostsRetryInterval * 1000);
+			ERRORMSG("Getting hosts file(s) failed.\n");
 		}
+
+		SLEEP(UpdateInterval * 1000);
 	}
+
+	SafeFree(URLs);
 }
 
 static const char *Hosts_FindFromContainer(HostsContainer *Container, StringChunk *SubContainer, const char *Name)
@@ -263,10 +213,6 @@ static BOOL Hosts_IsExcludedDomain(HostsContainer *Container, const char *Name)
 	return StringChunk_Match((StringChunk *)&(Container -> ExcludedDomains), Name, NULL, NULL);
 }
 
-#define	MATCH_STATE_PERFECT		0
-#define	MATCH_STATE_ONLY_CNAME	1
-#define	MATCH_STATE_NONE		(-1)
-#define	MATCH_STATE_DESABLED	(-2)
 static int Hosts_Match(HostsContainer *Container, const char *Name, DNSRecordType Type, const char **Result)
 {
 	if( Container == NULL )
@@ -276,7 +222,7 @@ static int Hosts_Match(HostsContainer *Container, const char *Name, DNSRecordTyp
 
 	if( Hosts_IsExcludedDomain(Container, Name) == TRUE )
 	{
-		return MATCH_STATE_DESABLED;
+		return MATCH_STATE_DISABLED;
 	}
 
 	switch( Type )
@@ -292,6 +238,11 @@ static int Hosts_Match(HostsContainer *Container, const char *Name, DNSRecordTyp
 			break;
 
 		case DNS_TYPE_AAAA:
+			if( DisableIpv6WhenIpv4Exists == TRUE && Hosts_FindIPv4(Container, Name) != NULL )
+			{
+				return MATCH_STATE_DISABLE_IPV6;
+			}
+
 			*Result = Hosts_FindIPv6(Container, Name);
 			if( *Result == NULL )
 			{
@@ -328,19 +279,23 @@ static int Hosts_Match(HostsContainer *Container, const char *Name, DNSRecordTyp
 static int Hosts_GenerateSingleRecord(DNSRecordType Type, const char *IPOrCName, char *Buffer)
 {
 	int RecordLength;
+	int DataLength;
 
 	switch( Type )
 	{
 		case DNS_TYPE_A:
-			RecordLength = 2 + 2 + 2 + 4 + 2 + 4;
+			DataLength = 4;
+			RecordLength = 2 + 2 + 2 + 4 + 2 + DataLength;
 			break;
 
 		case DNS_TYPE_AAAA:
-			RecordLength = 2 + 2 + 2 + 4 + 2 + 16;
+			DataLength = 16;
+			RecordLength = 2 + 2 + 2 + 4 + 2 + DataLength;
 			break;
 
 		case DNS_TYPE_CNAME:
-			RecordLength = 2 + 2 + 2 + 4 + 2 + strlen(IPOrCName) + 2;
+			DataLength = strlen(IPOrCName) + 2;
+			RecordLength = 2 + 2 + 2 + 4 + 2 + DataLength;
 			break;
 
 		default:
@@ -348,7 +303,7 @@ static int Hosts_GenerateSingleRecord(DNSRecordType Type, const char *IPOrCName,
 			break;
 	}
 
-	DNSGenResourceRecord(Buffer + 1, INT_MAX, "", Type, DNS_CLASS_IN, 60, IPOrCName, 4, FALSE);
+	DNSGenResourceRecord(Buffer + 1, INT_MAX, "", Type, DNS_CLASS_IN, 60, IPOrCName, DataLength, FALSE);
 
 	Buffer[0] = 0xC0;
 	Buffer[1] = 0x0C;
@@ -356,7 +311,7 @@ static int Hosts_GenerateSingleRecord(DNSRecordType Type, const char *IPOrCName,
 	return RecordLength;
 }
 
-static void GetAnswersByName(SOCKET Socket, Address_Type *BackAddress, int Identifier, const char *Name, DNSRecordType Type)
+static int GetAnswersByName(SOCKET Socket, Address_Type *BackAddress, int Identifier, const char *Name, DNSRecordType Type)
 {
 	static struct _RequestEntity {
 		ControlHeader	Header;
@@ -383,7 +338,7 @@ static void GetAnswersByName(SOCKET Socket, Address_Type *BackAddress, int Ident
 	RequestLength += DNSGenQuestionRecord(NamePos, sizeof(RequestEntity.Entity) - 12, Name, Type, DNS_CLASS_IN);
 	if( RequestLength == sizeof(ControlHeader) + 12 )
 	{
-        return;
+        return -1;
 	}
 
 	RequestEntity.Header.NeededHeader = TRUE;
@@ -394,7 +349,7 @@ static void GetAnswersByName(SOCKET Socket, Address_Type *BackAddress, int Ident
 	RequestEntity.Header.RequestingDomainHashValue = ELFHash(Name, 0);
 	*(uint16_t *)DNSEntity = Identifier;
 
-	InternalInterface_SendTo(INTERNAL_INTERFACE_UDP_INCOME, Socket, (char *)&RequestEntity, RequestLength);
+	return InternalInterface_SendTo(INTERNAL_INTERFACE_UDP_LOOPBACK_LOCAL, Socket, (char *)&RequestEntity, RequestLength);
 }
 
 int DynamicHosts_SocketLoop(void)
@@ -411,7 +366,7 @@ int DynamicHosts_SocketLoop(void)
 	static fd_set	ReadSet, ReadySet;
 
 	static const struct timeval	LongTime = {3600, 0};
-	static const struct timeval	ShortTime = {2, 0};
+	static const struct timeval	ShortTime = {10, 0};
 
 	struct timeval	TimeLimit = LongTime;
 
@@ -450,7 +405,7 @@ int DynamicHosts_SocketLoop(void)
 				break;
 
 			case 0:
-				if( InternalInterface_QueryContextSwep(&Context, 2, NULL) == TRUE )
+				if( InternalInterface_QueryContextSwep(&Context, 10, NULL) == TRUE )
 				{
 					TimeLimit = LongTime;
 				} else {
@@ -467,7 +422,7 @@ int DynamicHosts_SocketLoop(void)
 					int TotalLength = 0;
 					int	MatchState;
 					const char *MatchResult = NULL;
-					BOOL GetLock = FALSE;
+					BOOL GotLock = FALSE;
 					BOOL NeededSendBack = TRUE;
 
 					State = recvfrom(HostsIncomeSocket,
@@ -483,32 +438,46 @@ int DynamicHosts_SocketLoop(void)
 						break;
 					}
 
-					if( Internet == FALSE )
-					{
-						TryLoadHosts();
-					}
-
 					MatchState = Hosts_Match(&MainStaticContainer, Header -> RequestingDomain, Header -> RequestingType, &MatchResult);
 					if( MatchState == MATCH_STATE_NONE && MainDynamicContainer != NULL )
 					{
 						RWLock_WrLock(HostsLock);
-						MatchState = Hosts_Match(MainDynamicContainer, Header -> RequestingDomain, Header -> RequestingType, &MatchResult);
+						MatchState = Hosts_Match((HostsContainer *)MainDynamicContainer, Header -> RequestingDomain, Header -> RequestingType, &MatchResult);
 
-						GetLock = TRUE;
+						GotLock = TRUE;
 					}
 
 					switch( MatchState )
 					{
 						case MATCH_STATE_PERFECT:
-							((DNSHeader *)(RequestEntity + sizeof(ControlHeader))) -> Flags.Direction = 1;
-							((DNSHeader *)(RequestEntity + sizeof(ControlHeader))) -> Flags.AuthoritativeAnswer = 0;
-							((DNSHeader *)(RequestEntity + sizeof(ControlHeader))) -> Flags.RecursionAvailable = 1;
-							((DNSHeader *)(RequestEntity + sizeof(ControlHeader))) -> Flags.ResponseCode = 0;
-							((DNSHeader *)(RequestEntity + sizeof(ControlHeader))) -> Flags.Type = 0;
-							DNSSetAnswerCount(RequestEntity + sizeof(ControlHeader), 1);
-							TotalLength = State;
-							TotalLength += Hosts_GenerateSingleRecord(Header -> RequestingType, MatchResult, RequestEntity + State);
-							NeededSendBack = TRUE;
+							ERRORMSG("A Bug hit.\n");
+							{
+								BOOL EDNSEnabled = FALSE;
+
+								if( DNSRemoveEDNSPseudoRecord(RequestEntity + sizeof(ControlHeader), &State) == EDNS_REMOVED )
+								{
+									EDNSEnabled = TRUE;
+								}
+
+								((DNSHeader *)(RequestEntity + sizeof(ControlHeader))) -> Flags.Direction = 1;
+								((DNSHeader *)(RequestEntity + sizeof(ControlHeader))) -> Flags.AuthoritativeAnswer = 0;
+								((DNSHeader *)(RequestEntity + sizeof(ControlHeader))) -> Flags.RecursionAvailable = 1;
+								((DNSHeader *)(RequestEntity + sizeof(ControlHeader))) -> Flags.ResponseCode = 0;
+								((DNSHeader *)(RequestEntity + sizeof(ControlHeader))) -> Flags.Type = 0;
+								DNSSetAnswerCount(RequestEntity + sizeof(ControlHeader), 1);
+								TotalLength = State;
+								TotalLength += Hosts_GenerateSingleRecord(Header -> RequestingType, MatchResult, RequestEntity + State);
+								NeededSendBack = TRUE;
+
+								if( EDNSEnabled == TRUE )
+								{
+									int	NewEntityLength = 0;
+
+									NewEntityLength = TotalLength - sizeof(ControlHeader);
+									DNSAppendEDNSPseudoRecord(RequestEntity + sizeof(ControlHeader), &NewEntityLength);
+									TotalLength = NewEntityLength + sizeof(ControlHeader);
+								}
+							}
 							break;
 
 						case MATCH_STATE_ONLY_CNAME:
@@ -522,9 +491,13 @@ int DynamicHosts_SocketLoop(void)
 							++NewIdentifier;
 							NeededSendBack = FALSE;
 							break;
+
+						default:
+							NeededSendBack = FALSE;
+							break;
 					}
 
-					if( GetLock == TRUE )
+					if( GotLock == TRUE )
 					{
 						RWLock_UnWLock(HostsLock);
 					}
@@ -558,12 +531,12 @@ int DynamicHosts_SocketLoop(void)
 											);
 					}
 
-
 				} else {
 					int		State;
 					static char		NewlyGeneratedRocord[2048];
 					ControlHeader	*NewHeader = (ControlHeader *)NewlyGeneratedRocord;
 
+					int 	TrimedLength;
 					int		RestLength;
 
 					int NewGeneratedLength = sizeof(ControlHeader);
@@ -591,14 +564,16 @@ int DynamicHosts_SocketLoop(void)
 
 					DNSSetNameServerCount(DNSResult, 0);
 
+					TrimedLength = DNSJumpOverAnswerRecords(DNSResult) - DNSResult;
+
 					AnswersPos = DNSJumpOverQuestionRecords(DNSResult);
 
-					if( DNSExpandCName_MoreSpaceNeeded(DNSResult) > sizeof(RequestEntity) - State )
+					if( DNSExpandCName_MoreSpaceNeeded(DNSResult, TrimedLength) > sizeof(RequestEntity) - State )
 					{
 						break;
 					}
 
-					DNSExpandCName(DNSResult);
+					DNSExpandCName(DNSResult, TrimedLength);
 
 					EntryNumber = InternalInterface_QueryContextFind(&Context,
 																	*(uint16_t *)DNSResult,
@@ -705,36 +680,70 @@ int DynamicHosts_SocketLoop(void)
 
 }
 
-BOOL Hosts_Try(const char *Domain, int Type)
+int Hosts_Try(char *Content, int *ContentLength)
 {
-	int MatchState;
-	const char *Result;
+	ControlHeader	*Header = (ControlHeader *)Content;
+	char			*RequestEntity = Content + sizeof(ControlHeader);
 
-	MatchState = Hosts_Match(&MainStaticContainer, Domain, Type, &Result);
-	if( MatchState == MATCH_STATE_NONE )
-	{
-		if( MainDynamicContainer != NULL )
-		{
-			RWLock_WrLock(HostsLock);
-			MatchState = Hosts_Match(MainDynamicContainer, Domain, Type, &Result);
-			RWLock_UnWLock(HostsLock);
+	int			MatchState;
+	const char	*MatchResult;
+	BOOL		GotLock = FALSE;
 
-			if( MatchState == MATCH_STATE_NONE )
-			{
-				return FALSE;
-			} else {
-				return TRUE;
-			}
-		} else {
-			return FALSE;
-		}
-	} else if( MatchState == MATCH_STATE_DESABLED )
+	MatchState = Hosts_Match(&MainStaticContainer, Header -> RequestingDomain, Header -> RequestingType, &MatchResult);
+	if( MatchState == MATCH_STATE_NONE && MainDynamicContainer != NULL )
 	{
-		return FALSE;
-	} else {
-		return TRUE;
+		RWLock_WrLock(HostsLock);
+		MatchState = Hosts_Match((HostsContainer *)MainDynamicContainer, Header -> RequestingDomain, Header -> RequestingType, &MatchResult);
+		GotLock = TRUE;
 	}
 
+	if( MatchState == MATCH_STATE_PERFECT )
+	{
+		BOOL EDNSEnabled = FALSE;
+
+		switch( DNSRemoveEDNSPseudoRecord(RequestEntity, ContentLength) )
+		{
+			case EDNS_REMOVED:
+				EDNSEnabled = TRUE;
+				break;
+
+			case EDNS_NO_AR:
+				EDNSEnabled = FALSE;
+				break;
+
+			default:
+				if( GotLock == TRUE )
+				{
+					RWLock_UnWLock(HostsLock);
+				}
+
+				return MATCH_STATE_NONE;
+		}
+
+		((DNSHeader *)(RequestEntity)) -> Flags.Direction = 1;
+		((DNSHeader *)(RequestEntity)) -> Flags.AuthoritativeAnswer = 0;
+		((DNSHeader *)(RequestEntity)) -> Flags.RecursionAvailable = 1;
+		((DNSHeader *)(RequestEntity)) -> Flags.ResponseCode = 0;
+		((DNSHeader *)(RequestEntity)) -> Flags.Type = 0;
+		DNSSetAnswerCount(RequestEntity, 1);
+		*ContentLength += Hosts_GenerateSingleRecord(Header -> RequestingType, MatchResult, Content + *ContentLength);
+
+		if( EDNSEnabled == TRUE )
+		{
+			int	NewEntityLength = 0;
+
+			NewEntityLength = *ContentLength - sizeof(ControlHeader);
+			DNSAppendEDNSPseudoRecord(RequestEntity, &NewEntityLength);
+			*ContentLength = NewEntityLength + sizeof(ControlHeader);
+		}
+	}
+
+	if( GotLock == TRUE )
+	{
+		RWLock_UnWLock(HostsLock);
+	}
+
+	return MatchState;
 }
 
 int DynamicHosts_Init(ConfigFileInfo *ConfigInfo)
@@ -743,6 +752,7 @@ int DynamicHosts_Init(ConfigFileInfo *ConfigInfo)
 
 	StaticHostsInited = ( StaticHosts_Init(ConfigInfo) >= 0 );
 
+	DisableIpv6WhenIpv4Exists = ConfigGetBoolean(ConfigInfo, "DisableIpv6WhenIpv4Exists");
 	Path = ConfigGetRawString(ConfigInfo, "Hosts");
 
 	if( Path == NULL )
@@ -752,48 +762,28 @@ int DynamicHosts_Init(ConfigFileInfo *ConfigInfo)
 	}
 
 	UpdateInterval = ConfigGetInt32(ConfigInfo, "HostsUpdateInterval");
+	HostsRetryInterval = ConfigGetInt32(ConfigInfo, "HostsRetryInterval");
 
 	RWLock_Init(HostsLock);
 
-	if( strncmp(Path, "http", 4) != 0 && strncmp(Path, "ftp", 3) != 0 )
+	File = ConfigGetRawString(ConfigInfo, "HostsDownloadPath");
+
+	if( HostsRetryInterval < 0 )
 	{
-		/* Local file */
-		File = Path;
-
-		INFO("Hosts File : \"%s\"\n", Path);
-
-		if( DynamicHosts_Load() != 0 )
-		{
-			ERRORMSG("Loading Hosts failed.\n");
-			File = NULL;
-			return 1;
-		}
-
-	} else {
-		/* Internet file */
-		File = ConfigGetRawString(ConfigInfo, "HostsDownloadPath");
-
-		if( ConfigGetInt32(ConfigInfo, "HostsRetryInterval") < 0 )
-		{
-			ERRORMSG("`HostsRetryInterval' is too small (< 0).\n");
-			File = NULL;
-			return 1;
-		}
-
-		Internet = TRUE;
-
-		INFO("Hosts File : \"%s\" -> \"%s\"\n", Path, File);
-
-		if( FileIsReadable(File) )
-		{
-			INFO("Loading the existing hosts file ...\n");
-			DynamicHosts_Load();
-		} else {
-			INFO("Hosts file is unreadable, this may cause some failures.\n");
-		}
+		ERRORMSG("`HostsRetryInterval' is too small (< 0).\n");
+		File = NULL;
+		return 1;
 	}
 
-	LastUpdate = time(NULL);
+	INFO("Local hosts file : \"%s\"\n", File);
+
+	if( FileIsReadable(File) )
+	{
+		INFO("Loading the existing hosts file ...\n");
+		DynamicHosts_Load();
+	} else {
+		INFO("Hosts file is unreadable, this may cause some failures.\n");
+	}
 
 	return 0;
 
@@ -804,10 +794,11 @@ int DynamicHosts_Start(ConfigFileInfo *ConfigInfo)
 	if( StaticHostsInited == TRUE || File != NULL )
 	{
 		ThreadHandle	t;
+
 		CREATE_THREAD(DynamicHosts_SocketLoop, NULL, t);
 		DETACH_THREAD(t);
 
-		if( Internet == TRUE )
+		if( File != NULL )
 		{
 			CREATE_THREAD(GetHostsFromInternet_Thread, ConfigInfo, GetHosts_Thread);
 		}

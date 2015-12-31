@@ -4,6 +4,8 @@
 #include "array.h"
 
 typedef struct _Bst_NodeHead{
+
+	/* -1, root; -2 deleted */
 	int32_t	Parent;
 	int32_t	Left;
 	int32_t	Right;
@@ -11,6 +13,7 @@ typedef struct _Bst_NodeHead{
 
 typedef struct _Bst {
 	Array	*Nodes;
+	BOOL    PrivateNodes;
 
 	int32_t	Root;
 
@@ -39,6 +42,6 @@ int32_t Bst_Successor_ByNumber(Bst *t, int32_t NodeNumber);
 
 int32_t Bst_Delete_ByNumber(Bst *t, int32_t NodeNumber);
 
-void Bst_Reset(Bst *t);
+int Bst_Reset(Bst *t);
 
 #endif // BST_H_INCLUDED

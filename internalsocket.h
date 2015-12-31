@@ -16,7 +16,10 @@ typedef enum _InternalInterfaceType {
 	INTERNAL_INTERFACE_TCP_INCOME = 1,
 	INTERNAL_INTERFACE_HOSTS = 2,
 	INTERNAL_INTERFACE_UDP_QUERY = 3,
-	INTERNAL_INTERFACE_TCP_QUERY = 4
+	INTERNAL_INTERFACE_TCP_QUERY = 4,
+
+	/* This just holds address information, we don't neet the socket.  */
+	INTERNAL_INTERFACE_UDP_LOOPBACK_LOCAL = 5
 
 } InternalInterfaceType;
 

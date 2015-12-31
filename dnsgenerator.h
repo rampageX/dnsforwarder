@@ -21,6 +21,8 @@
 
 #define DNSSetAdditionalCount(dns_start, AdC)	SET_16_BIT_U_INT((char *)(dns_start) + 10, AdC)
 
+#define DNSLabelMakePointer(pointer_ptr, location)	(((unsigned char *)(pointer_ptr))[0] = (192 + (location) / 256), ((unsigned char *)(pointer_ptr))[1] = (location) % 256)
+
 extern const char OptPseudoRecord[];
 #define	OPT_PSEUDORECORD_LENGTH	11
 
@@ -68,5 +70,12 @@ int DNSGenResourceRecord(	__out char		*Buffer,
 #define DNSSetResourceDataLength(ans_start_ptr, len)	SET_16_BIT_U_INT(DNSJumpOverName(ans_start_ptr) + 8, len)
 
 int DNSAppendAnswerRecord(__inout char *OriginBody, __in char *Record, __in int RecordLength);
+
+#define	EDNS_REMOVED	1
+#define	EDNS_NO_AR		0
+#define EDNS_NOT_EDNS	(-1)
+int DNSRemoveEDNSPseudoRecord(char *RequestContent, int *RequestLength);
+
+void DNSAppendEDNSPseudoRecord(char *RequestContent, int *RequestLength);
 
 #endif /* _DNS_GENERATOR_H_ */

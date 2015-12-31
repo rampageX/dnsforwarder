@@ -8,6 +8,8 @@
 
 int InitAddress(ConfigFileInfo *ConfigInfo);
 
+int InitCheckIPs(ConfigFileInfo *ConfigInfo);
+
 BOOL SocketIsStillReadable(SOCKET Sock, int timeout);
 
 void ClearSocketBuffer(SOCKET Sock);
@@ -19,22 +21,19 @@ int SendAndReveiveRawMessageViaTCP(SOCKET			Sock,
 								   uint16_t		*TCPLength /* Big-endian */
 								   );
 
+int TCPProxies_Init(StringList *Proxies);
+
 int QueryDNSViaTCP(void);
 
-void SetUDPAntiPollution(BOOL State);
+void SetUDPFilter(BOOL State);
 
-void SetUDPAppendEDNSOpt(BOOL State);
+void SetAppendEDNSOpt(BOOL State);
 
 int InitBlockedIP(StringList *l);
 
 int InitIPSubstituting(StringList *l);
 
 int QueryDNSViaUDP(void);
-
-int ProbeFakeAddresses(const char	*ServerAddress,
-					   const char	*RequestingDomain,
-					   StringList	*out
-					   );
 
 struct TestServerArguments
 {
@@ -49,6 +48,8 @@ int SetSocketWait(SOCKET sock, BOOL Wait);
 int SetSocketSendTimeLimit(SOCKET sock, int time);
 
 int SetSocketRecvTimeLimit(SOCKET sock, int time);
+
+int SetSocketNonBlock(SOCKET sock, BOOL NonBlocked);
 
 BOOL TCPSocketIsHealthy(SOCKET sock);
 

@@ -50,18 +50,21 @@ sa_family_t AddressList_ConvertToAddressFromString(__out	Address_Type	*Out,
 												   );
 
 int AddressList_Add_From_String(__in	AddressList	*a,
-								__in	const char		*Addr_Port);
+								__in	const char	*Addr_Port,
+								__in	int			DefaultPort
+								);
 /* Description:
  *  Add an address in text to an AddressList.
  * Parameters:
- *  a         : The AddressList to be added in.
- *  Addr_Port : A string in the form of IP:Port, which will be interpreted
- *              to a typical address struct and added to the AddressList.
- *                `Port' and the colon just before it can be omitted,
- *              in this case, the port will be assumed to be 53.
- *                An IPv6 IP should be enclosed in square bracket,
- *              like [2001:a5::1], in order not to be confused with :Port.
- *              The full IPv6:Port is like [2001:a5::1]:80 .
+ *  a           :  The AddressList to be added in.
+ *  Addr_Port   : A string in the form of IP:Port, which will be interpreted
+ *                to a typical address struct and added to the AddressList.
+ *                  `Port' and the colon just before it can be omitted,
+ *                in this case, the port will be assumed to be `DefaultPort'.
+ *                  An IPv6 IP should be enclosed in square bracket,
+ *                like [2001:a5::1], in order not to be confused with :Port.
+ *                The full IPv6:Port is like [2001:a5::1]:80 .
+ *  DefaultPort : The port used when `:Port' is absent.
  * Return value:
  *  0 on success, a non-zero value otherwise.
  */
@@ -88,6 +91,12 @@ struct sockaddr *AddressList_GetOne(__in		AddressList	*a,
  * Return value:
  *  The pointer to the fetched address.
  */
+
+#define AddressList_GetNumberOfAddresses(a_ptr)	( Array_GetUsed(&((a_ptr) -> AddressList)) )
+
+/* You should free the return value and *families after the are no longer needed. */
+struct sockaddr **AddressList_GetPtrListOfFamily(AddressList *a, sa_family_t family);
+struct sockaddr **AddressList_GetPtrList(AddressList *a, sa_family_t **families);
 
 #define AddressList_Free(a_ptr)	(Array_Free(&((a_ptr) -> AddressList)))
 /* Description:

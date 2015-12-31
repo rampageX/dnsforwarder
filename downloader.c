@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #ifndef	WIN32
 #ifndef DOWNLOAD_LIBCURL
@@ -13,21 +14,176 @@
 
 #ifndef NODOWNLOAD
 #ifdef WIN32
-#include "common.h"
 #else
 #include <limits.h>
 #ifdef DOWNLOAD_LIBCURL
 #include <curl/curl.h>
 #endif /* DOWNLOAD_LIBCURL */
 #ifdef DOWNLOAD_WGET
-#include "utils.h"
 #include <stdlib.h>
 #include <sys/wait.h>
 #endif /* DOWNLOAD_WGET */
 #endif
+#include "common.h"
+#include "utils.h"
 #endif /* NODOWNLOAD */
 
 #include "downloader.h"
+#include "debug.h"
+
+int GetFromInternet_MultiFiles(const char	**URLs,
+							   const char	*File,
+							   int			RetryInterval,
+							   int			RetryTimes,
+							   void			(*ErrorCallBack)(int ErrorCode, const char *URL, const char *File),
+							   void			(*SuccessCallBack)(const char *URL, const char *File)
+							   )
+{
+	int State = FALSE;
+	FILE *fp;
+	char *TempFile;
+
+	TempFile = SafeMalloc(strlen(File) + sizeof("") + 1);
+	if( TempFile == NULL )
+	{
+		ERRORMSG("Cannot create temp file %s\n", TempFile);
+		return -1;
+	}
+
+	strcpy(TempFile, File);
+	strcat(TempFile, ".tmp");
+
+	fp = fopen(TempFile, "w");
+	if( fp != NULL )
+	{
+		fclose(fp);
+	} else {
+		ERRORMSG("Cannot create temp file %s\n", TempFile);
+		SafeFree(TempFile);
+		return -2;
+	}
+
+	while( *URLs != NULL )
+	{
+		State |= !GetFromInternet_SingleFile(*URLs, TempFile, TRUE, RetryInterval, RetryTimes, ErrorCallBack, SuccessCallBack);
+
+		fp = fopen(TempFile, "a+");
+		if( fp != NULL )
+		{
+			fputc('\n', fp);
+			fclose(fp);
+		} else {
+			break;
+		}
+
+		++URLs;
+	}
+
+	if( State && TRUE )
+	{
+		remove(File);
+		rename(TempFile, File);
+	}
+
+	SafeFree(TempFile);
+	return !State;
+}
+
+int GetFromInternet_SingleFile(const char	*URL,
+							   const char	*File,
+							   BOOL			Append,
+							   int			RetryInterval,
+							   int			RetryTimes,
+							   void			(*ErrorCallBack)(int ErrorCode, const char *URL, const char *File),
+							   void			(*SuccessCallBack)(const char *URL, const char *File)
+							   )
+{
+	int DownloadState = 0;
+
+	if( strncmp(URL, "file", 4) == 0 )
+	{
+		char LocalPath[384];
+
+		if( GetLocalPathFromURL(URL, LocalPath, sizeof(LocalPath)) == NULL )
+		{
+			if( ErrorCallBack != NULL )
+			{
+				ErrorCallBack(0, URL, File);
+			}
+
+			return -1;
+		}
+
+		if( CopyAFile(LocalPath, File, Append) != 0 )
+		{
+			if( ErrorCallBack != NULL )
+			{
+				ErrorCallBack(0, URL, File);
+			}
+
+			return -1;
+		}
+
+		if( SuccessCallBack != NULL )
+		{
+			SuccessCallBack(URL, File);
+		}
+
+		return 0;
+	} else {
+		int Ret = -1;
+		char *TempFile;
+		TempFile = SafeMalloc(strlen(File) + sizeof(".tmp") + 1);
+		if( TempFile == NULL )
+		{
+			return -1;
+		}
+		strcpy(TempFile, File);
+		strcat(TempFile, ".tmp");
+
+		while( RetryTimes != 0 )
+		{
+			DownloadState = GetFromInternet_Base(URL, TempFile);
+			if( DownloadState == 0 )
+			{
+				if( SuccessCallBack != NULL )
+				{
+					SuccessCallBack(URL, File);
+				}
+
+				if( CopyAFile(TempFile, File, Append) != 0 )
+				{
+					if( ErrorCallBack != NULL )
+					{
+						ErrorCallBack(0, URL, File);
+					}
+
+					Ret = -1;
+					break;
+				} else {
+					Ret = 0;
+					break;
+				}
+			} else {
+				if( RetryTimes > 0 )
+				{
+					--RetryTimes;
+				}
+
+				if( ErrorCallBack != NULL )
+				{
+					ErrorCallBack((-1) * DownloadState, URL, File);
+				}
+
+				SLEEP(RetryInterval * 1000);
+			}
+		}
+
+		remove(TempFile);
+		SafeFree(TempFile);
+		return Ret;
+	}
+}
 
 #ifdef DOWNLOAD_LIBCURL
 static size_t WriteFileCallback(void *Contents, size_t Size, size_t nmemb, void *FileDes)
@@ -40,10 +196,10 @@ static size_t WriteFileCallback(void *Contents, size_t Size, size_t nmemb, void 
 }
 #endif /* DOWNLOAD_LIBCURL */
 
-int GetFromInternet(const char *URL, const char *File)
+int GetFromInternet_Base(const char *URL, const char *File)
 {
 #ifndef NODOWNLOAD
-#ifdef WIN32
+#	ifdef WIN32
 	FILE		*fp;
 	HINTERNET	webopen		=	NULL,
 				webopenurl	=	NULL;
@@ -71,7 +227,7 @@ int GetFromInternet(const char *URL, const char *File)
 
 	InternetSetOption(webopenurl, INTERNET_OPTION_CONNECT_TIMEOUT, &TimeOut, sizeof(TimeOut));
 
-	fp = fopen(File, "wb");
+	fp = fopen(File, "wb" );
 	if( fp == NULL )
 	{
 		ret = -1 * GetLastError();
@@ -106,9 +262,9 @@ int GetFromInternet(const char *URL, const char *File)
 	fclose(fp);
 
 	return 0;
-#else /* WIN32 */
+#	else /* WIN32 */
 
-#ifdef DOWNLOAD_LIBCURL
+#		ifdef DOWNLOAD_LIBCURL
 	CURL *curl;
 	CURLcode res;
 
@@ -147,15 +303,15 @@ int GetFromInternet(const char *URL, const char *File)
 		fclose(fp);
 		return 0;
 	}
-#endif /* DOWNLOAD_LIBCURL */
-#ifdef DOWNLOAD_WGET
+#		endif /* DOWNLOAD_LIBCURL */
+#		ifdef DOWNLOAD_WGET
 	char Cmd[2048];
 
 	sprintf(Cmd, "wget -t 2 -T 60 -q --no-check-certificate %s -O %s ", URL, File);
 
 	return Execute(Cmd);
-#endif /* DOWNLOAD_WGET */
-#endif /* WIN32 */
+#		endif /* DOWNLOAD_WGET */
+#	endif /* WIN32 */
 #else /* NODOWNLOAD */
 	return -1;
 #endif /* NODOWNLOAD */

@@ -87,6 +87,10 @@ int	GetConfigDirectory(char *out);
 
 BOOL FileIsReadable(const char *File);
 
+int GetFileSizePortable(const char *File);
+
+int GetTextFileContent(const char *File, char *Content);
+
 BOOL IsPrime(int n);
 
 int FindNextPrime(int Current);
@@ -114,5 +118,11 @@ int GetAddressLength(sa_family_t Family);
 int SetProgramEnvironment(const char *Name, const char *Value);
 
 int ExpandPath(char *String, int BufferLength);
+
+char *GetLocalPathFromURL(const char *URL, char *Buffer, int BufferLength);
+
+int CopyAFile(const char *Src, const char *Dst, BOOL Append);
+
+int FatalErrorDecideding(int LastError);
 
 #endif /* _UTILS_ */

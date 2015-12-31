@@ -34,8 +34,8 @@ int Array_Init(__in Array *a, __in int DataLength, __in int InitialCount, __in B
 
 	return 0;
 }
-/* Subscript is always non-negative. */
-void *Array_GetBySubscript(__in Array *a, __in int Subscript)
+/* Subscripts are always non-negative. */
+void *Array_GetBySubscript(__in const Array *a, __in int Subscript)
 {
 	if( Subscript >= 0 && Subscript < a -> Used )
 	{
@@ -50,7 +50,7 @@ void *Array_GetBySubscript(__in Array *a, __in int Subscript)
 	}
 }
 
-/* Subscribe returned */
+/* Subscript returned */
 int Array_PushBack(__in Array *a, __in_opt const void *Data, __in_opt void *Boundary /* Only used by grow down array */)
 {
 	if( a -> Allocated >= 0 )
@@ -87,7 +87,7 @@ int Array_PushBack(__in Array *a, __in_opt const void *Data, __in_opt void *Boun
 }
 
 
-void *Array_SetToSubscript(Array *a, int Subscript, void *Data)
+void *Array_SetToSubscript(Array *a, int Subscript, const void *Data)
 {
 	if( a -> Allocated >= 0 )
 	{
@@ -124,6 +124,15 @@ void Array_Sort(Array *a, int (*Compare)(const void *, const void *))
 		qsort(a -> Data - (a -> Used * a -> DataLength), a -> Used, a -> DataLength, Compare);
 	} else {
 		qsort(a -> Data, a -> Used, a -> DataLength, Compare);
+	}
+}
+
+void Array_Fill(Array *a, int Num, const void *DataSample)
+{
+	int i;
+	for( i = 0; i < Num; ++i )
+	{
+		Array_SetToSubscript(a, i, DataSample);
 	}
 }
 

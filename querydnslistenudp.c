@@ -77,10 +77,16 @@ static int Query(char *Content, int ContentLength, int BufferLength, Address_Typ
 		memcpy(&(Header -> BackAddress), ClientAddr, sizeof(Address_Type));
 
 		Header -> RequestingDomain[0] = '\0';
-		DNSGetHostName(RequestEntity,
-					   DNSJumpHeader(RequestEntity),
-					   Header -> RequestingDomain
-					   );
+		if( DNSGetHostName(RequestEntity,
+							ContentLength - sizeof(ControlHeader),
+							DNSJumpHeader(RequestEntity),
+							Header -> RequestingDomain,
+							sizeof(Header -> RequestingDomain)
+							)
+			< 0 )
+		{
+			return -1;
+		}
 		StrToLower(Header -> RequestingDomain);
 		Header -> RequestingType =
 			(DNSRecordType)DNSGetRecordType(DNSJumpHeader(RequestEntity));
@@ -90,7 +96,7 @@ static int Query(char *Content, int ContentLength, int BufferLength, Address_Typ
 	State = QueryBase(Content, ContentLength, BufferLength, UDPOutcomeSocket);
 	switch( State )
 	{
-		case QUERY_RESULT_SUCESS:
+		case QUERY_RESULT_SUCCESS:
 			ret = 0;
 			break;
 

@@ -2,8 +2,8 @@
 #define _COMMON_H_
 
 #include <limits.h>
-#ifdef HAVE_CONFIG_H
-#include "config.h"
+	#ifdef HAVE_CONFIG_H
+	#include "config.h"
 #endif /* HAVE_CONFIG_H */
 
 /* There are some differeces between Linux and Windows.
@@ -94,6 +94,8 @@
 	#define WILDCARD_MATCH(p, s)	PathMatchSpec((s), (p))
 	#define WILDCARD_MATCHED		TRUE	/* Used as return value */
 
+	#define	CONNECT_FUNCTION_BLOCKED	WSAEWOULDBLOCK
+
 	typedef short	sa_family_t;
 
 #else /* For Linux below */
@@ -115,9 +117,9 @@
 	#include <sys/mman.h>	/* mmap */
 	#include <fcntl.h>
 
-#ifdef HAVE_SYS_SYSCALL_H
-	#include <sys/syscall.h> /* syscall */
-#endif /* HAVE_SYS_SYSCALL_H */
+	#ifdef HAVE_SYS_SYSCALL_H
+		#include <sys/syscall.h> /* syscall */
+	#endif /* HAVE_SYS_SYSCALL_H */
 
 	#include <pwd.h>	/* struct passwd */
 
@@ -235,6 +237,8 @@
 	#define WILDCARD_MATCH(p, s)	fnmatch((p), (s), FNM_NOESCAPE)
 	#define WILDCARD_MATCHED	0
 
+	#define	CONNECT_FUNCTION_BLOCKED	EINPROGRESS
+
 #endif /* WIN32 */
 
 #ifdef WIN32
@@ -271,47 +275,51 @@
 #define __STILL
 
 #ifdef HAVE_STDINT_H
-#include <stdint.h>
+	#include <stdint.h>
 #else
-#if (INT_MAX == 2147483647)
-#define int32_t		int
-#define uint32_t		unsigned int
-#define UINT32_T_MAX	0xFFFFFFFF
-#endif
+	#ifndef __USE_MISC
 
-#if (SHRT_MAX == 32767)
-#define int16_t	short
-#define uint16_t	unsigned short
-#endif
+		#if (INT_MAX == 2147483647)
+			#define int32_t		int
+			#define uint32_t		unsigned int
+			#define UINT32_T_MAX	0xFFFFFFFF
+		#endif
+
+		#if (SHRT_MAX == 32767)
+			#define int16_t	short
+			#define uint16_t	unsigned short
+		#endif
+
+	#endif
 #endif
 
 #ifndef HAVE_IN_PORT_T
-typedef uint16_t	in_port_t;
+	typedef uint16_t	in_port_t;
 #endif
 
 /* Parameters' tag */
 #ifndef __in
-#define __in
+	#define __in
 #endif /* __in */
 
 #ifndef __in_opt
-#define __in_opt
+	#define __in_opt
 #endif /* __in_opt */
 
 #ifndef __out
-#define __out
+	#define __out
 #endif /* __out */
 
 #ifndef __out_opt
-#define __out_opt
+	#define __out_opt
 #endif /* __out_opt */
 
 #ifndef __inout
-#define __inout
+	#define __inout
 #endif /* __inout */
 
 #ifndef __inout_opt
-#define __inout_opt
+	#define __inout_opt
 #endif /* __inout_opt */
 
 #define LENGTH_OF_IPV6_ADDRESS_ASCII	40

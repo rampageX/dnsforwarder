@@ -7,14 +7,20 @@
 #include "addresschunk.h"
 #include "ipchunk.h"
 #include "internalsocket.h"
+#include "socketpool.h"
+#include "checkip.h"
 #include "utils.h"
 #include "common.h"
 
 static AddressChunk	Addresses;
 static BOOL			ParallelQuery;
 
-static sa_family_t	ParallelMainFamily;
-static Array		Addresses_Array;
+static sa_family_t	UDPParallelMainFamily = AF_UNSPEC;
+static struct sockaddr **UDPAddresses_Array = NULL;
+static sa_family_t	*TCPParallelFamilies = NULL;
+static struct sockaddr **TCPAddresses_Array = NULL;
+
+static CheckIP *CheckIPFor = NULL;
 
 static int LoadDedicatedServer(ConfigFileInfo *ConfigInfo)
 {
@@ -39,6 +45,32 @@ static int LoadDedicatedServer(ConfigFileInfo *ConfigInfo)
 	}
 
 	StringList_Free(DedicatedServer);
+
+	return 0;
+}
+
+int InitCheckIPs(ConfigFileInfo *ConfigInfo)
+{
+	StringList	*ci	=	ConfigGetStringList(ConfigInfo, "CheckIP");
+	const char	*Itr	=	NULL;
+
+	CheckIPFor = SafeMalloc(sizeof(CheckIP));
+	if( CheckIPFor == NULL )
+	{
+		return -1;
+	}
+
+	if( CheckIP_Init(CheckIPFor) != 0 )
+	{
+		return -2;
+	}
+
+	Itr = StringList_GetNext(ci, NULL);
+	while( Itr != NULL )
+	{
+		CheckIP_Add_From_String(CheckIPFor, Itr);
+		Itr = StringList_GetNext(ci, Itr);
+	}
 
 	return 0;
 }
@@ -79,16 +111,12 @@ int InitAddress(ConfigFileInfo *ConfigInfo)
 		Itr = StringList_GetNext(udpaddrs, Itr);
 	}
 
+	TCPAddresses_Array = AddressList_GetPtrList(AddressChunk_GetTCPPart(&Addresses), &TCPParallelFamilies);
+
 	ParallelQuery = ConfigGetBoolean(ConfigInfo, "ParallelQuery");
 	if( ParallelQuery == TRUE )
 	{
 		int NumberOfAddr;
-
-		int AddrLen;
-
-		sa_family_t SubFamily;
-
-		struct sockaddr *OneAddr;
 
 		NumberOfAddr = StringList_Count(udpaddrs);
 		if( NumberOfAddr <= 0 )
@@ -96,28 +124,9 @@ int InitAddress(ConfigFileInfo *ConfigInfo)
 			ERRORMSG("No UDP server specified, cannot use parallel query.\n")
 			ParallelQuery = FALSE;
 		} else {
+			AddressChunk_GetOneUDPBySubscript(&Addresses, &UDPParallelMainFamily, 0);
 
-			AddressChunk_GetOneUDPBySubscript(&Addresses, &ParallelMainFamily, 0);
-
-			if( ParallelMainFamily == AF_INET )
-			{
-				AddrLen = sizeof(struct sockaddr);
-			} else {
-				AddrLen = sizeof(struct sockaddr_in6);
-			}
-
-			Array_Init(&Addresses_Array, AddrLen, NumberOfAddr, FALSE, NULL);
-
-			while( NumberOfAddr != 0 )
-			{
-				OneAddr = AddressChunk_GetOneUDPBySubscript(&Addresses, &SubFamily, NumberOfAddr - 1);
-				if( OneAddr != NULL && SubFamily == ParallelMainFamily )
-				{
-					Array_PushBack(&Addresses_Array, OneAddr, NULL);
-				}
-
-				--NumberOfAddr;
-			}
+			UDPAddresses_Array = AddressList_GetPtrListOfFamily(AddressChunk_GetUDPPart(&Addresses), UDPParallelMainFamily);
 		}
 	}
 
@@ -125,42 +134,19 @@ int InitAddress(ConfigFileInfo *ConfigInfo)
 	StringList_Free(udpaddrs);
 
 	return LoadDedicatedServer(ConfigInfo);
-
 }
 
 static sa_family_t GetAddress(ControlHeader		*Header,
 							  DNSQuaryProtocol	ProtocolUsed,
 							  struct sockaddr	**Addresses_List,
-							  int				*NumberOfAddresses,
 							  sa_family_t		*Family
 							  )
 {
 	*Addresses_List = AddressChunk_GetDedicated(&Addresses, Family, Header -> RequestingDomain, &(Header -> RequestingDomainHashValue));
-
 	if( *Addresses_List == NULL )
 	{
-		if( ProtocolUsed == DNS_QUARY_PROTOCOL_UDP && ParallelQuery == TRUE )
-		{
-			*Addresses_List = (struct sockaddr *)Addresses_Array.Data;
-			if( NumberOfAddresses != NULL )
-			{
-				*NumberOfAddresses = Addresses_Array.Used;
-			}
-			*Family = ParallelMainFamily;
-		} else {
-			*Addresses_List = AddressChunk_GetOne(&Addresses, Family, ProtocolUsed);
-			if( NumberOfAddresses != NULL )
-			{
-				*NumberOfAddresses = 1;
-			}
-		}
-	} else {
-		if( NumberOfAddresses != NULL )
-		{
-			*NumberOfAddresses = 1;
-		}
+		*Addresses_List = AddressChunk_GetOne(&Addresses, Family, ProtocolUsed);
 	}
-
 	return *Family;
 }
 
@@ -219,92 +205,286 @@ void ClearTCPSocketBuffer(SOCKET Sock, int Length)
 	SET_LAST_ERROR(OriginErrorCode);
 }
 
-static BOOL UDPAppendEDNSOpt = FALSE;
-static BOOL UDPAntiPollution = FALSE;
+static BOOL AppendEDNSOpt = FALSE;
+static BOOL UDPFilter = FALSE;
 
-void SetUDPAntiPollution(BOOL State)
+void SetUDPFilter(BOOL State)
 {
-	UDPAntiPollution = State;
+	UDPFilter = State;
 }
 
-void SetUDPAppendEDNSOpt(BOOL State)
+void SetAppendEDNSOpt(BOOL State)
 {
-	UDPAppendEDNSOpt = State;
+	AppendEDNSOpt = State;
 }
 
+#define CHECKIPS_ERROR_OR_TIMEOUT	(-1)
+#define CHECKIPS_NOTHING_HAPPEND	0
+static int CheckIPs(const Array *Ips, sa_family_t Family, int Port, int Timeout, char *AnswerEntity, const char *Domain, BOOL AdditionalRecord)
+{
+	static Array	SocketsA	=	Array_Init_Static(sizeof(SOCKET));
+	static const SOCKET	InvalidSocket	=	INVALID_SOCKET;
+
+	fd_set	rfd;
+	struct timeval	Time	=	{Timeout / 1000, (Timeout % 1000) * 1000};
+	int	MaxFd	=	-1;
+
+	const void *Finally = NULL;
+	int	FinallyI = -1;
+
+	int	i;
+
+	Array_Clear(&SocketsA);
+	Array_Fill(&SocketsA, Array_GetUsed(Ips), &InvalidSocket);
+	FD_ZERO(&rfd);
+
+	for( i = 0; i != Array_GetUsed(Ips); ++i )
+    {
+		const struct sockaddr **ra = (const struct sockaddr **)Array_GetBySubscript(Ips, i);
+
+		if( ra != NULL && *ra != NULL )
+		{
+			SOCKET	skt;
+
+			skt = socket(Family, SOCK_STREAM, IPPROTO_TCP);
+			if( skt == INVALID_SOCKET )
+			{
+				continue;
+			}
+			SetSocketNonBlock(skt, TRUE);
+			if( Family == AF_INET )
+			{
+				struct sockaddr_in sa;
+
+				memset(&(sa), 0, sizeof(sa));
+
+				sa.sin_family = AF_INET;
+				sa.sin_port = htons((uint16_t)Port);
+				memcpy(&(sa.sin_addr), *ra, sizeof(sa.sin_addr));
+
+				if( connect(skt, (const struct sockaddr *)&sa, GetAddressLength(Family)) != 0 && FatalErrorDecideding(GET_LAST_ERROR()) != 0 )
+				{
+					CLOSE_SOCKET(skt);
+					continue;
+				}
+
+			} else {
+				struct sockaddr_in6 sa;
+
+				memset(&(sa), 0, sizeof(sa));
+
+				sa.sin6_family = AF_INET6;
+				sa.sin6_port = htons((uint16_t)Port);
+				memcpy(&(sa.sin6_addr), *ra, sizeof(sa.sin6_addr));
+
+				if( connect(skt, (const struct sockaddr *)&sa, GetAddressLength(Family)) != 0 && FatalErrorDecideding(GET_LAST_ERROR()) != 0 )
+				{
+					CLOSE_SOCKET(skt);
+					continue;
+				}
+			}
+
+			if( (int)skt > MaxFd )
+			{
+				MaxFd = skt;
+			}
+
+			FD_SET(skt, &rfd);
+			Array_SetToSubscript(&SocketsA, i, &skt);
+		}
+    }
+
+    if( MaxFd < 0 )
+    {
+		INFO("Oops! Cannot find any useable IP of %s.\n", Domain);
+		return CHECKIPS_NOTHING_HAPPEND;
+    }
+
+	switch( select(MaxFd + 1, NULL, &rfd, NULL, &Time) )
+	{
+		case 0:
+		case SOCKET_ERROR:
+			for( i = 0; i < Array_GetUsed(&SocketsA); ++i)
+			{
+				const SOCKET *rs = (const SOCKET *)Array_GetBySubscript(&SocketsA, i);
+
+				if( rs != NULL && *rs != INVALID_SOCKET )
+				{
+					CLOSE_SOCKET(*rs);
+				}
+			}
+			INFO("Oops! Cannot find any useable IP of %s.\n", Domain);
+			return CHECKIPS_ERROR_OR_TIMEOUT;
+			break;
+
+		default:
+			for( i = 0; i < Array_GetUsed(&SocketsA); ++i)
+			{
+				const SOCKET *rs = (const SOCKET *)Array_GetBySubscript(&SocketsA, i);
+
+				if( rs != NULL && *rs != INVALID_SOCKET )
+				{
+					if( FD_ISSET(*rs, &rfd) )
+					{
+						const void **fa = (const void **)Array_GetBySubscript(Ips, i);
+
+						if( fa != NULL && *fa != NULL )
+						{
+							Finally = *fa;
+							FinallyI = i;
+						}
+					}
+					CLOSE_SOCKET(*rs);
+				}
+			}
+			break;
+	}
+
+/* Now Finally got. */
+{ /* Stage 2 */
+	char *AnswerRecordPos;
+	uint32_t Ttl = 0;
+	int	ResultLength = 0;
+
+	AnswerRecordPos = DNSJumpOverQuestionRecords(AnswerEntity);
+
+	Ttl = DNSGetTTL(DNSGetAnswerRecordPosition(AnswerEntity, FinallyI));
+
+	DNSGenResourceRecord(AnswerRecordPos + 1,
+						INT_MAX,
+						"",
+						Family == AF_INET ? DNS_TYPE_A : DNS_TYPE_AAAA,
+						DNS_CLASS_IN,
+						Ttl,
+						Finally,
+						Family == AF_INET ? 4 : 16,
+						FALSE
+						);
+
+	AnswerRecordPos[0] = 0xC0;
+	AnswerRecordPos[1] = 0x0C;
+
+	DNSSetAnswerCount(AnswerEntity, 1);
+
+	ResultLength = DNSJumpOverAnswerRecords(AnswerEntity) - AnswerEntity;
+
+	if( AdditionalRecord == TRUE )
+	{
+		DNSAppendEDNSPseudoRecord(AnswerEntity, &ResultLength);
+	} else {
+		DNSSetAdditionalCount(AnswerEntity, 0);
+	}
+
+	return ResultLength;
+} /* Stage 2 */
+}
+
+#define	IP_MISCELLANEOUS_TYPE_UNKNOWN		0
 #define	IP_MISCELLANEOUS_TYPE_BLOCK			1
 #define	IP_MISCELLANEOUS_TYPE_SUBSTITUTE	2
 static IpChunk	*IPMiscellaneous = NULL;
 
-static BOOL DoIPMiscellaneous(const char *RequestEntity, const char *Domain, BOOL Block, BOOL EDNSEnabled)
+#define	IP_MISCELLANEOUS_BLOCK	(-1)
+#define	IP_MISCELLANEOUS_NOTHING	(0)
+/* Something else means the package's length has changed to the value. */
+static int DoIPMiscellaneous(char *RequestEntity, int RequestLength, const char *Domain, BOOL Block, BOOL EDNSEnabled, const CheckingMeta *CheckM)
 {
+	static	Array	IpsOfThisAnswer	=	Array_Init_Static(sizeof(void *));
 	int		AnswerCount;
+	DNSRecordType	QuestionRecordType = DNS_TYPE_UNKNOWN;
 
 	if( ((DNSHeader *)RequestEntity) -> Flags.ResponseCode != 0 )
 	{
-		return TRUE;
+		return IP_MISCELLANEOUS_BLOCK;
 	}
 
 	AnswerCount = DNSGetAnswerCount(RequestEntity);
+	if( CheckM != NULL && DNSGetQuestionCount(RequestEntity) > 0 )
+	{
+		QuestionRecordType = DNSGetRecordType(DNSGetQuestionRecordPosition(RequestEntity, 1));
+		if( QuestionRecordType != DNS_TYPE_A && QuestionRecordType != DNS_TYPE_AAAA )
+		{
+			QuestionRecordType = DNS_TYPE_UNKNOWN;
+		} else {
+			static const void *const NullPtr = NULL;
+			Array_Clear(&IpsOfThisAnswer);
+			Array_Fill(&IpsOfThisAnswer, AnswerCount, &NullPtr);
+		}
+	} else {
+		QuestionRecordType = DNS_TYPE_UNKNOWN;
+	}
 
 	if( AnswerCount > 0 )
 	{
-		const unsigned char *Answer;
-		uint32_t *Data;
+		const char *Answer;
+		char *Data;
 
-		int	ActionType;
+		int	ActionType = IP_MISCELLANEOUS_TYPE_UNKNOWN;
 		const char *ActionData;
 
 		if( Block == TRUE && EDNSEnabled == TRUE && DNSGetAdditionalCount(RequestEntity) == 0 )
 		{
-			DomainStatistic_Add(Domain, NULL, STATISTIC_TYPE_POISONED);
-			ShowBlockedMessage(Domain, RequestEntity, "False package, discarded");
-			return TRUE;
+			DomainStatistic_Add(Domain, NULL, STATISTIC_TYPE_BLOCKEDMSG);
+			ShowBlockedMessage(Domain, RequestEntity, RequestLength, "False package, discarded");
+			return IP_MISCELLANEOUS_BLOCK;
 		}
 
-		Answer = (const unsigned char *)DNSGetAnswerRecordPosition(RequestEntity, 1);
+		Answer = (const char *)DNSGetAnswerRecordPosition(RequestEntity, 1);
 
-		Data = (uint32_t *)DNSGetResourceDataPos(Answer);
+		Data = (char *)DNSGetResourceDataPos(Answer);
 
-		if( Block == TRUE && DNSGetRecordType(Answer) == DNS_TYPE_A && *Answer != 0xC0 )
+		if( Block == TRUE && (!DNSIsLabelPointerStart(GET_8_BIT_U_INT(Answer))) )
 		{
-			if( IPMiscellaneous != NULL )
-			{
-				if( IpChunk_Find(IPMiscellaneous, *Data, &ActionType, NULL) == TRUE )
-				{
-					if( ActionType == IP_MISCELLANEOUS_TYPE_BLOCK )
-					{
-						ShowBlockedMessage(Domain, RequestEntity, "False package, discarded");
-					} else {
-						ShowBlockedMessage(Domain, RequestEntity, "False package, discarded. And its IP address is not in `UDPBlock_IP'");
-					}
-				} else {
-					ShowBlockedMessage(Domain, RequestEntity, "False package, discarded. And its IP address is not in `UDPBlock_IP'");
-				}
-			}
+			ShowBlockedMessage(Domain, RequestEntity, RequestLength, "False package, discarded");
 
-			DomainStatistic_Add(Domain, NULL, STATISTIC_TYPE_POISONED);
-			return TRUE;
+			DomainStatistic_Add(Domain, NULL, STATISTIC_TYPE_BLOCKEDMSG);
+			return IP_MISCELLANEOUS_BLOCK;
 		}
 
-		if( IPMiscellaneous != NULL )
+		if( IPMiscellaneous != NULL || QuestionRecordType != DNS_TYPE_UNKNOWN )
 		{
-			int					Loop		=	1;
-			const unsigned char	*Answer1	=	Answer;
-			uint32_t			*Data1		=	Data;
+			int			Loop		=	1;
+			const char	*Answer1	=	Answer;
+			char		*Data1		=	Data;
+			BOOL		FindResult;
 
 			do
 			{
-				if( DNSGetRecordType(Answer1) == DNS_TYPE_A && IpChunk_Find(IPMiscellaneous, *Data1, &ActionType, &ActionData) == TRUE )
+				switch( DNSGetRecordType(Answer1) )
+				{
+					case DNS_TYPE_A:
+						FindResult = IpChunk_Find(IPMiscellaneous, *(uint32_t *)Data1, &ActionType, &ActionData);
+
+						if( QuestionRecordType == DNS_TYPE_A )
+						{
+							Array_SetToSubscript(&IpsOfThisAnswer, Loop, &Data1);
+						}
+						break;
+
+					case DNS_TYPE_AAAA:
+						FindResult = IpChunk_Find6(IPMiscellaneous, Data1, &ActionType, &ActionData);
+
+						if( QuestionRecordType == DNS_TYPE_AAAA )
+						{
+							Array_SetToSubscript(&IpsOfThisAnswer, Loop, &Data1);
+						}
+						break;
+
+					default:
+						goto ItrEnd;
+						break;
+				}
+
+				if( FindResult == TRUE )
 				{
 					switch( ActionType )
 					{
 						case IP_MISCELLANEOUS_TYPE_BLOCK:
 							if( Block == TRUE )
 							{
-								ShowBlockedMessage(Domain, RequestEntity, "One of the IPs is in blocked list, discarded");
-								DomainStatistic_Add(Domain, NULL, STATISTIC_TYPE_POISONED);
-								return TRUE;
+								ShowBlockedMessage(Domain, RequestEntity, RequestLength, "One of the IPs is in `UDPBlock_IP', discarded");
+								DomainStatistic_Add(Domain, NULL, STATISTIC_TYPE_BLOCKEDMSG);
+								return IP_MISCELLANEOUS_BLOCK;
 							}
 							break;
 
@@ -318,6 +498,7 @@ static BOOL DoIPMiscellaneous(const char *RequestEntity, const char *Domain, BOO
 
 				}
 
+ItrEnd:
 				++Loop;
 
 				if( Loop > AnswerCount )
@@ -325,36 +506,72 @@ static BOOL DoIPMiscellaneous(const char *RequestEntity, const char *Domain, BOO
 					break;
 				}
 
-				Answer1 = (const unsigned char *)DNSGetAnswerRecordPosition(RequestEntity, Loop);
-				Data1 = (uint32_t *)DNSGetResourceDataPos(Answer1);
+				Answer1 = (const char *)DNSGetAnswerRecordPosition(RequestEntity, Loop);
+				Data1 = (char *)DNSGetResourceDataPos(Answer1);
 
 			} while( TRUE );
-
 		}
 
-		return FALSE;
+		if( QuestionRecordType != DNS_TYPE_UNKNOWN )
+		{
+			int CheckIPRet = CheckIPs(&IpsOfThisAnswer,
+								QuestionRecordType == DNS_TYPE_A ? AF_INET : AF_INET6,
+								CheckM -> Port,
+								CheckM -> Timeout,
+								RequestEntity,
+								Domain,
+								EDNSEnabled
+								);
+			switch( CheckIPRet ){
+				case -1:
+					if( CheckM -> Strategy == STRATEGY_DISCARD )
+					{
+						return IP_MISCELLANEOUS_BLOCK;
+					} else {
+						return IP_MISCELLANEOUS_NOTHING;
+					}
+					break;
+
+				case 0:
+					return IP_MISCELLANEOUS_NOTHING;
+					break;
+
+				default:
+					return CheckIPRet;
+					break;
+			}
+		}
+
+		return IP_MISCELLANEOUS_NOTHING;
 	} else {
-		return FALSE;
+		return IP_MISCELLANEOUS_NOTHING;
 	}
 }
 
-static void SendBack(SOCKET Socket,
-					 ControlHeader *Header,
-					 QueryContext *Context,
-					 int Length,
-					 char Protocal,
-					 StatisticType Type,
-					 BOOL NeededBlock
-					 )
+static int SendBack(SOCKET Socket,
+					ControlHeader *Header,
+					QueryContext *Context,
+					int Length, /* Length of Response, including ControlHeader */
+					char Protocal,
+					StatisticType Type,
+					BOOL NeededBlock
+					)
 {
+	int		Ret = 1;
 	char	*RequestEntity = (char *)(Header + 1);
 	int32_t	QueryContextNumber;
 	QueryContextEntry	*ThisContext;
 
-	DNSGetHostName(RequestEntity,
-				   DNSJumpHeader(RequestEntity),
-				   Header -> RequestingDomain
-				   );
+	if( DNSGetHostName(RequestEntity,
+						Length - sizeof(ControlHeader),
+						DNSJumpHeader(RequestEntity),
+						Header -> RequestingDomain,
+						sizeof(Header -> RequestingDomain)
+						)
+		< 0 )
+	{
+		return -1;
+	}
 
 	StrToLower(Header -> RequestingDomain);
 
@@ -363,39 +580,87 @@ static void SendBack(SOCKET Socket,
 	QueryContextNumber = InternalInterface_QueryContextFind(Context, *(uint16_t *)RequestEntity, Header -> RequestingDomainHashValue);
 	if( QueryContextNumber >= 0 )
 	{
+		int MiscellaneousRet;
 		ThisContext = Bst_GetDataByNumber(Context, QueryContextNumber);
 
 		DomainStatistic_Add(Header -> RequestingDomain, &(Header -> RequestingDomainHashValue), Type);
 
-		if( DoIPMiscellaneous(RequestEntity, Header -> RequestingDomain, NeededBlock, ThisContext -> EDNSEnabled) == FALSE )
+		MiscellaneousRet = DoIPMiscellaneous(RequestEntity, Length - sizeof(ControlHeader), Header -> RequestingDomain, NeededBlock, ThisContext -> EDNSEnabled, CheckIP_Find(CheckIPFor, Header -> RequestingDomain));
+		if( MiscellaneousRet != IP_MISCELLANEOUS_BLOCK )
 		{
+			if( MiscellaneousRet != IP_MISCELLANEOUS_NOTHING )
+			{
+				Length = sizeof(ControlHeader) + MiscellaneousRet;
+			}
+
 			if( ThisContext -> NeededHeader == TRUE )
 			{
-				sendto(Socket,
-						(const char *)Header,
-						Length,
-						0,
-						(const struct sockaddr *)&(ThisContext -> Context.BackAddress.Addr),
-						GetAddressLength(ThisContext -> Context.BackAddress.family)
-						);
+				Ret = sendto(Socket,
+							(const char *)Header,
+							Length,
+							0,
+							(const struct sockaddr *)&(ThisContext -> Context.BackAddress.Addr),
+							GetAddressLength(ThisContext -> Context.BackAddress.family)
+							);
 
 			} else {
-				sendto(Socket,
-						RequestEntity,
-						Length - sizeof(ControlHeader),
-						0,
-						(const struct sockaddr *)&(ThisContext -> Context.BackAddress.Addr),
-						GetAddressLength(ThisContext -> Context.BackAddress.family)
-						);
+				Ret = sendto(Socket,
+							RequestEntity,
+							Length - sizeof(ControlHeader),
+							0,
+							(const struct sockaddr *)&(ThisContext -> Context.BackAddress.Addr),
+							GetAddressLength(ThisContext -> Context.BackAddress.family)
+							);
 			}
 
 			InternalInterface_QueryContextRemoveByNumber(Context, QueryContextNumber);
 			ShowNormalMassage(ThisContext -> Agent, Header -> RequestingDomain, RequestEntity, Length - sizeof(ControlHeader), Protocal);
-			DNSCache_AddItemsToCache(RequestEntity, time(NULL));
+			DNSCache_AddItemsToCache(RequestEntity, Length - sizeof(ControlHeader),time(NULL), Header -> RequestingDomain);
 		}
 	} else {
 		/* ShowNormalMassage("Redundant Package", Header -> RequestingDomain, RequestEntity, Length - sizeof(ControlHeader), Protocal); */
 	}
+
+	return Ret;
+}
+
+static AddressList *TCPProxies = NULL;
+
+int TCPProxies_Init(StringList *Proxies)
+{
+	const char *Itr = NULL;
+
+	if( Proxies == NULL )
+	{
+		return 0;
+	}
+
+	if( TCPProxies == NULL )
+	{
+		TCPProxies = malloc(sizeof(AddressList));
+		if( TCPProxies == NULL )
+		{
+			return -1;
+		}
+
+		if( AddressList_Init(TCPProxies) != 0 )
+		{
+			return -2;
+		}
+	}
+
+	Itr = StringList_GetNext(Proxies, NULL);
+	while( Itr != NULL )
+	{
+		if( AddressList_Add_From_String(TCPProxies, Itr, 1080) != 0 )
+		{
+			INFO("Bad address : %s\n", Itr);
+		}
+
+		Itr = StringList_GetNext(Proxies, Itr);
+	}
+
+	return 0;
 }
 
 static void TCPSwepOutput(QueryContextEntry *Entry, int Number)
@@ -406,7 +671,340 @@ static void TCPSwepOutput(QueryContextEntry *Entry, int Number)
 	if( Number == 1 )
 	{
 		AddressChunk_Advance(&Addresses, DNS_QUARY_PROTOCOL_TCP);
+		if( TCPProxies != NULL )
+		{
+			AddressList_Advance(TCPProxies);
+		}
 	}
+}
+
+static BOOL SocketIsWritable(SOCKET sock, int Timeout)
+{
+	struct timeval TimeLimit = {Timeout / 1000, (Timeout % 1000) * 1000};
+	fd_set rfd;
+
+	if( sock == INVALID_SOCKET )
+	{
+		return FALSE;
+	}
+
+	FD_ZERO(&rfd);
+	FD_SET(sock, &rfd);
+
+	switch(select(sock + 1, NULL, &rfd, NULL, &TimeLimit))
+	{
+		case 0:
+		case SOCKET_ERROR:
+			return FALSE;
+			break;
+
+		default:
+			return TRUE;
+			break;
+	}
+}
+
+static SOCKET ConnectToTCPServer(struct sockaddr    **ServerAddressesList,
+                                sa_family_t         *FamiliesList,
+                                const char          *Type
+                                )
+{
+#   define  CONNECT_TIMEOUT 5
+
+#   define  NUMBER_OF_SOCKETS 5
+	SOCKET	TCPSockets[NUMBER_OF_SOCKETS];
+	int		Itr;
+	BOOL	State = FALSE;
+	int		MaxFd = -1;
+
+#ifdef WIN32
+	clock_t TimeStart;
+#endif
+
+	fd_set rfd;
+	struct timeval TimeLimit = {CONNECT_TIMEOUT, 0};
+
+	INFO("Connecting to %s ...\n", Type);
+
+#ifdef WIN32
+	TimeStart = clock();
+#endif
+
+    for( Itr = 0; Itr != NUMBER_OF_SOCKETS; ++Itr)
+    {
+		TCPSockets[Itr] = INVALID_SOCKET;
+    }
+
+    FD_ZERO(&rfd);
+
+	for( Itr = 0; Itr != NUMBER_OF_SOCKETS; ++Itr)
+	{
+		if( ServerAddressesList[Itr] == NULL )
+		{
+			break;
+		}
+
+        TCPSockets[Itr] = socket(FamiliesList[Itr], SOCK_STREAM, IPPROTO_TCP);
+        if( TCPSockets[Itr] == INVALID_SOCKET )
+        {
+			continue;
+        }
+
+        SetSocketNonBlock(TCPSockets[Itr], TRUE);
+
+		if( connect(TCPSockets[Itr], ServerAddressesList[Itr], GetAddressLength(FamiliesList[Itr])) != 0 )
+		{
+			if( GET_LAST_ERROR() != CONNECT_FUNCTION_BLOCKED )
+			{
+				CLOSE_SOCKET(TCPSockets[Itr]);
+				continue;
+			}
+		}
+
+		if( TCPSockets[Itr] > MaxFd )
+		{
+			MaxFd = TCPSockets[Itr];
+		}
+
+		FD_SET(TCPSockets[Itr], &rfd);
+
+		State |= TRUE;
+    }
+
+    if( State == FALSE )
+    {
+		ERRORMSG("Cannot connect to %s.\n", Type);
+		return INVALID_SOCKET;
+    }
+/*
+	TCPSocket = socket(Family, SOCK_STREAM, IPPROTO_TCP);
+	if( TCPSocket == INVALID_SOCKET )
+	{
+		ERRORMSG("Cannot create socket for TCP query.\n");
+		return INVALID_SOCKET;
+	}
+
+	SetSocketNonBlock(TCPSocket, TRUE);
+
+	if( connect(TCPSocket, ServerAddress, GetAddressLength(Family)) != 0 )
+	{
+		if( GET_LAST_ERROR() != CONNECT_FUNCTION_BLOCKED )
+		{
+			ERRORMSG("Cannot connect to %s.\n", Type);
+			CLOSE_SOCKET(TCPSocket);
+			return INVALID_SOCKET;
+		}
+	}
+
+	FD_ZERO(&rfd);
+	FD_SET(TCPSocket, &rfd);
+*/
+	switch(select(MaxFd + 1, NULL, &rfd, NULL, &TimeLimit))
+	{
+		case 0:
+		case SOCKET_ERROR:
+		{
+			for( Itr = 0; Itr != NUMBER_OF_SOCKETS; ++Itr )
+			{
+				CloseTCPConnection(TCPSockets[Itr]);
+			}
+
+			INFO("Connecting to %s timed out.\n", Type);
+			return INVALID_SOCKET;
+		}
+			break;
+
+		default:
+		{
+			SOCKET	Ret = INVALID_SOCKET;
+			int		Number = -1;
+			for( Itr = 0; Itr != NUMBER_OF_SOCKETS; ++Itr )
+			{
+				if( TCPSockets[Itr] != INVALID_SOCKET && FD_ISSET(TCPSockets[Itr], &rfd) )
+				{
+					Ret = TCPSockets[Itr];
+					Number = Itr;
+				} else {
+					CloseTCPConnection(TCPSockets[Itr]);
+				}
+			}
+#ifdef WIN32
+			INFO("TCP connection to %s established (No %d). Time consumed : %dms\n", Type, Number, (int)((clock() - TimeStart) * 1000 / CLOCKS_PER_SEC));
+#else
+			INFO("TCP connection to %s established (No %d). Time consumed : %d.%ds\n", Type, Number, CONNECT_TIMEOUT == TimeLimit.tv_sec ? 0 : ((int)(CONNECT_TIMEOUT - 1 - TimeLimit.tv_sec)), CONNECT_TIMEOUT == TimeLimit.tv_sec ? 0 : ((int)(1000000 - TimeLimit.tv_usec)));
+#endif
+			return Ret;
+		}
+			break;
+	}
+
+	return INVALID_SOCKET;
+}
+
+static int TCPSend_Wrapper(SOCKET Sock, const char *Start, int Length)
+{
+#define DEFAULT_TIME_OUT__SEND 2000 /*  */
+	while( send(Sock, Start, Length, MSG_NOSIGNAL) != Length )
+	{
+		int LastError = GET_LAST_ERROR();
+#ifdef WIN32
+		if( LastError == WSAEWOULDBLOCK || LastError == WSAEINPROGRESS )
+		{
+			if( SocketIsWritable(Sock, 2000) == TRUE )
+			{
+				continue;
+			}
+		}
+#else
+		if( LastError == EAGAIN || LastError == EWOULDBLOCK )
+		{
+			if( SocketIsWritable(Sock, 2000) == TRUE )
+			{
+				continue;
+			}
+		}
+#endif
+		return (-1) * LastError;
+	}
+
+	return Length;
+}
+
+static int TCPRecv_Wrapper(SOCKET Sock, char *Buffer, int BufferSize)
+{
+	int Recvlength;
+
+	while( (Recvlength = recv(Sock, Buffer, BufferSize, MSG_NOSIGNAL)) < 0 )
+	{
+		int LastError = GET_LAST_ERROR();
+#ifdef WIN32
+		if( LastError == WSAEWOULDBLOCK || LastError == WSAEINPROGRESS )
+		{
+			if( SocketIsStillReadable(Sock, 20000) == TRUE )
+			{
+				continue;
+			}
+		}
+#else
+		if( LastError == EAGAIN || LastError ==  EWOULDBLOCK )
+		{
+			if( SocketIsStillReadable(Sock, 20000) == TRUE )
+			{
+				continue;
+			}
+		}
+#endif
+		return (-1) * LastError;
+	}
+
+	return Recvlength;
+}
+
+static void ShowSocketError(const char *Prompts, int ErrorNum)
+{
+	char	ErrorMessage[320];
+
+	if( ErrorMessages == TRUE )
+	{
+		GetErrorMsg(ErrorNum, ErrorMessage, sizeof(ErrorMessage));
+		ERRORMSG("%s : %d : %s\n", Prompts, ErrorNum, ErrorMessage);
+	}
+}
+
+static int TCPProxyPreparation(SOCKET Sock, const struct sockaddr	*NestedAddress, sa_family_t Family)
+{
+    char AddressString[LENGTH_OF_IPV6_ADDRESS_ASCII];
+    char NumberOfCharacter;
+    unsigned short Port;
+    char RecvBuffer[16];
+    int ret;
+
+    if( Family == AF_INET )
+    {
+		strcpy(AddressString, inet_ntoa(((const struct sockaddr_in *)NestedAddress) -> sin_addr));
+		Port = ((const struct sockaddr_in *)NestedAddress) -> sin_port;
+    } else {
+		IPv6AddressToAsc(&(((const struct sockaddr_in6 *)NestedAddress) -> sin6_addr), AddressString);
+		Port = ((const struct sockaddr_in6 *)NestedAddress) -> sin6_port;
+    }
+
+	if( TCPSend_Wrapper(Sock, "\x05\x01\x00", 3) != 3 )
+	{
+		ShowSocketError("Cannot communicate with TCP proxy, negotiation error", GET_LAST_ERROR());
+		return -1;
+	}
+
+    if( (ret = TCPRecv_Wrapper(Sock, RecvBuffer, 2)) != 2 )
+    {
+		/*printf("--------------GetLastError : %d, ret : %d\n", GET_LAST_ERROR(), ret);*/
+		ShowSocketError("Cannot communicate with TCP proxy, negotiation error", GET_LAST_ERROR());
+        return -2;
+    }
+
+	if( RecvBuffer[0] != '\x05' || RecvBuffer[1] != '\x00' )
+	{
+		/*printf("---------3 : %x %x\n", RecvBuffer[0], RecvBuffer[1]);*/
+		ShowSocketError("Cannot communicate with TCP proxy, negotiation error", GET_LAST_ERROR());
+		return -3;
+	}
+
+	INFO("Connecting to TCP server.\n");
+
+	if( TCPSend_Wrapper(Sock, "\x05\x01\x00\x03", 4) != 4 )
+	{
+		ShowSocketError("Cannot communicate with TCP proxy, connection to TCP server error", GET_LAST_ERROR());
+		return -4;
+	}
+	NumberOfCharacter = strlen(AddressString);
+	if( TCPSend_Wrapper(Sock, &NumberOfCharacter, 1) != 1 )
+	{
+		ShowSocketError("Cannot communicate with TCP proxy, connection to TCP server error", GET_LAST_ERROR());
+		return -5;
+	}
+	if( TCPSend_Wrapper(Sock, AddressString, NumberOfCharacter) != NumberOfCharacter )
+	{
+		ShowSocketError("Cannot communicate with TCP proxy, connection to TCP server error", GET_LAST_ERROR());
+		return -6;
+	}
+	if( TCPSend_Wrapper(Sock, (const char *)&Port, sizeof(Port)) != sizeof(Port) )
+	{
+		ShowSocketError("Cannot communicate with TCP proxy, connection to TCP server error", GET_LAST_ERROR());
+		return -7;
+	}
+
+	TCPRecv_Wrapper(Sock, RecvBuffer, 4);
+	if( RecvBuffer[1] != '\x00' )
+	{
+		ShowSocketError("Cannot communicate with TCP proxy, connection to TCP server error", GET_LAST_ERROR());
+		return -8;
+	}
+
+	switch( RecvBuffer[3] )
+	{
+		case 0x01:
+			NumberOfCharacter = 6;
+			break;
+
+		case 0x03:
+			TCPRecv_Wrapper(Sock, &NumberOfCharacter, 1);
+			NumberOfCharacter += 2;
+			break;
+
+		case 0x04:
+			NumberOfCharacter = 18;
+			break;
+
+		default:
+			/*printf("------Here : %d %d %d %d\n", RecvBuffer[0], RecvBuffer[1], RecvBuffer[2], RecvBuffer[3]);*/
+			ShowSocketError("Cannot communicate with TCP proxy, connection to TCP server error", GET_LAST_ERROR());
+			return -9;
+	}
+	ClearTCPSocketBuffer(Sock, NumberOfCharacter);
+
+	INFO("Connected to TCP server.\n");
+
+	return 0;
+
 }
 
 int QueryDNSViaTCP(void)
@@ -415,14 +1013,21 @@ int QueryDNSViaTCP(void)
 
 	SOCKET	TCPQueryIncomeSocket;
 	SOCKET	TCPQueryOutcomeSocket;
+	time_t	TCPQueryOutcomeSocketLast;
+	SOCKET	*TCPQueryActiveSocketPtr;
+	time_t	*TCPQueryActiveSocketLastPtr;
+	#define TIME_EXPIRED_SECOND	2
+
 	SOCKET	SendBackSocket;
+
+	SocketPool	DedicatedSockets;
 
 	int		NumberOfQueryBeforeSwep = 0;
 
 	static fd_set	ReadSet, ReadySet;
 
 	static const struct timeval	LongTime = {3600, 0};
-	static const struct timeval	ShortTime = {2, 0};
+	static const struct timeval	ShortTime = {10, 0};
 
 	struct timeval	TimeLimit = LongTime;
 
@@ -431,24 +1036,22 @@ int QueryDNSViaTCP(void)
 	static char		RequestEntity[2048];
 	ControlHeader	*Header = (ControlHeader *)RequestEntity;
 
-	sa_family_t		LastFamily = MAIN_FAMILY;
-	struct sockaddr	*LastAddress = NULL;
-
 	TCPQueryIncomeSocket = InternalInterface_TryOpenLocal(10100, INTERNAL_INTERFACE_TCP_QUERY);
-	TCPQueryOutcomeSocket = socket(MAIN_FAMILY, SOCK_STREAM, IPPROTO_TCP);
+	TCPQueryOutcomeSocket = INVALID_SOCKET;
+	TCPQueryActiveSocketPtr = NULL;
 
 	SendBackSocket = InternalInterface_GetSocket(INTERNAL_INTERFACE_UDP_INCOME);
 
-	if( TCPQueryOutcomeSocket == INVALID_SOCKET )
+	if( SocketPool_Init(&DedicatedSockets) != 0 )
 	{
+		ERRORMSG("Init ds failed (806).\n");
 		return -1;
 	}
 
-	MaxFd = TCPQueryIncomeSocket > TCPQueryOutcomeSocket ? TCPQueryIncomeSocket : TCPQueryOutcomeSocket;
+	MaxFd = TCPQueryIncomeSocket;
 	FD_ZERO(&ReadSet);
 	FD_ZERO(&ReadySet);
 	FD_SET(TCPQueryIncomeSocket, &ReadSet);
-	FD_SET(TCPQueryOutcomeSocket, &ReadSet);
 
 	InternalInterface_InitQueryContext(&Context);
 
@@ -459,13 +1062,32 @@ int QueryDNSViaTCP(void)
 		switch( select(MaxFd + 1, &ReadySet, NULL, NULL, &TimeLimit) )
 		{
 			case SOCKET_ERROR:
-				ERRORMSG("\n\n\n\n\n\n\n\n\n\n");
-				ERRORMSG(" !!!!! Something bad happend, please restert this program.\n");
-				while( TRUE ) SLEEP(100000);
+				{
+					int LastError = GET_LAST_ERROR();
+					ERRORMSG("SOCKET_ERROR Reached, 1062.\n");
+					if( FatalErrorDecideding(LastError) != 0 )
+					{
+						ERRORMSG("\n\n\n\n\n\n\n\n\n\n");
+						ERRORMSG(" !!!!! Something bad happend, this program will try to recovery after 10 seconds (1066). %d\n", LastError);
+						SLEEP(10000);
+
+						if( TCPQueryOutcomeSocket != INVALID_SOCKET )
+						{
+							CLOSE_SOCKET(TCPQueryOutcomeSocket);
+							TCPQueryOutcomeSocket = INVALID_SOCKET;
+						}
+						TCPQueryActiveSocketPtr = NULL;
+						SocketPool_CloseAll(&DedicatedSockets);
+						MaxFd = TCPQueryIncomeSocket;
+						FD_ZERO(&ReadSet);
+						FD_ZERO(&ReadySet);
+						FD_SET(TCPQueryIncomeSocket, &ReadSet);
+					}
+				}
 				break;
 
 			case 0:
-				if( InternalInterface_QueryContextSwep(&Context, 2, TCPSwepOutput) == TRUE )
+				if( InternalInterface_QueryContextSwep(&Context, 10, TCPSwepOutput) == TRUE )
 				{
 					TimeLimit = LongTime;
 				} else {
@@ -487,74 +1109,216 @@ int QueryDNSViaTCP(void)
 
 				if( FD_ISSET(TCPQueryIncomeSocket, &ReadySet) )
 				{
-					int	State;
-					sa_family_t	NewFamily;
-					struct sockaddr	*NewAddress;
-					uint16_t	TCPLength;
+					int				RecvState, SendState;
+					SOCKET			*SendOutSocket;
+					sa_family_t		NewFamily;
+					struct sockaddr	*NewAddress[2] = {NULL, NULL};
+					static char		TCPRerequest[2048 - sizeof(ControlHeader) + 2];
+					uint16_t		*TCPLength = (uint16_t *)TCPRerequest;
+					int				TCPRerequestLength;
 
-					State = recvfrom(TCPQueryIncomeSocket,
-									RequestEntity,
-									sizeof(RequestEntity),
-									0,
-									NULL,
-									NULL
-									);
+					RecvState = recvfrom(TCPQueryIncomeSocket,
+								RequestEntity,
+								sizeof(RequestEntity),
+								0,
+								NULL,
+								NULL
+								);
 
-					if( State < 1 )
+					if( RecvState < 1 )
 					{
+						ERRORMSG("RecvState : %d (833).\n", RecvState);
 						break;
+					} else {
+
 					}
 
-					GetAddress((ControlHeader *)RequestEntity, DNS_QUARY_PROTOCOL_TCP, &NewAddress, NULL, &NewFamily);
-					if( NewFamily != LastFamily || NewAddress != LastAddress || TCPSocketIsHealthy(TCPQueryOutcomeSocket) == FALSE )
+					if( AppendEDNSOpt == TRUE && DNSGetAdditionalCount(RequestEntity + sizeof(ControlHeader)) == 0 )
 					{
-						if( TCPQueryOutcomeSocket != INVALID_SOCKET )
-						{
-							FD_CLR(TCPQueryOutcomeSocket, &ReadSet);
-							CLOSE_SOCKET(TCPQueryOutcomeSocket);
-						}
+						memcpy(RequestEntity + RecvState, OptPseudoRecord, OPT_PSEUDORECORD_LENGTH);
 
-						TCPQueryOutcomeSocket = socket(NewFamily, SOCK_STREAM, IPPROTO_TCP);
-						if( TCPQueryOutcomeSocket == INVALID_SOCKET )
-						{
-							LastFamily = AF_UNSPEC;
-							break;
-						}
+						DNSSetAdditionalCount(RequestEntity + sizeof(ControlHeader), 1);
 
-						if( connect(TCPQueryOutcomeSocket, NewAddress, GetAddressLength(NewFamily)) != 0 )
-						{
-							AddressChunk_Advance(&Addresses, DNS_QUARY_PROTOCOL_TCP);
-							break;
-						}
-
-						LastFamily = NewFamily;
-						LastAddress = NewAddress;
-						if( TCPQueryOutcomeSocket > MaxFd )
-						{
-							MaxFd = TCPQueryOutcomeSocket;
-						}
-
-						FD_SET(TCPQueryOutcomeSocket, &ReadSet);
-
-						INFO("TCP connection to server established.\n");
+						RecvState += OPT_PSEUDORECORD_LENGTH;
 					}
+
+					/* Preparing socket */
+					if( TCPProxies == NULL )
+					{
+						/* Diretc connection */
+						NewAddress[0] = AddressChunk_GetDedicated(  &Addresses,
+																	&NewFamily,
+																	Header -> RequestingDomain,
+																	&(Header -> RequestingDomainHashValue)
+																	);
+						if( NewAddress[0] != NULL ) /* Dedicated server */
+						{
+							SendOutSocket = SocketPool_Fetch(&DedicatedSockets, NewAddress[0], &TCPQueryActiveSocketLastPtr);
+							if( SendOutSocket == NULL )
+							{
+								/* Something wrong */
+								break;
+							}
+
+							if( (time(NULL) - *TCPQueryActiveSocketLastPtr) > TIME_EXPIRED_SECOND || SocketIsWritable(*SendOutSocket, 0) == FALSE )
+							{
+								if( *SendOutSocket != INVALID_SOCKET )
+								{
+									FD_CLR(*SendOutSocket, &ReadSet);
+									CLOSE_SOCKET(*SendOutSocket);
+								}
+
+								*SendOutSocket = ConnectToTCPServer(NewAddress, &NewFamily, "TCP server");
+								if( *SendOutSocket == INVALID_SOCKET )
+								{
+									break;
+								}
+
+								TCPQueryActiveSocketPtr = SendOutSocket;
+								*TCPQueryActiveSocketLastPtr = time(NULL);
+							}
+						} else { /* General server */
+							if( (time(NULL) - TCPQueryOutcomeSocketLast) > TIME_EXPIRED_SECOND || SocketIsWritable(TCPQueryOutcomeSocket, 0) == FALSE )
+							{
+								if( TCPQueryOutcomeSocket != INVALID_SOCKET )
+								{
+									FD_CLR(TCPQueryOutcomeSocket, &ReadSet);
+									CLOSE_SOCKET(TCPQueryOutcomeSocket);
+								}
+								TCPQueryOutcomeSocket = ConnectToTCPServer(TCPAddresses_Array, TCPParallelFamilies, "TCP server");
+								if( TCPQueryOutcomeSocket == INVALID_SOCKET )
+								{
+									break;
+								}
+								TCPQueryOutcomeSocketLast = time(NULL);
+							}
+							TCPQueryActiveSocketPtr = &TCPQueryOutcomeSocket;
+							TCPQueryActiveSocketLastPtr = &TCPQueryOutcomeSocketLast;
+
+						}
+/*
+						if( *TCPQueryActiveSocketPtr == INVALID_SOCKET )
+						{
+							break;
+						}
+*/
+						if( *TCPQueryActiveSocketPtr > MaxFd )
+						{
+							MaxFd = *TCPQueryActiveSocketPtr;
+						}
+
+						FD_SET(*TCPQueryActiveSocketPtr, &ReadSet);
+					} else {
+						/* Connecting via proxy */
+						if( (time(NULL) - TCPQueryOutcomeSocketLast) > TIME_EXPIRED_SECOND || SocketIsWritable(TCPQueryOutcomeSocket, 0) == FALSE )
+						{
+							struct sockaddr	*NewProxy[2] = {NULL, NULL};
+							sa_family_t	ProxyFamily;
+							int ret;
+
+							if( TCPQueryOutcomeSocket != INVALID_SOCKET )
+							{
+								FD_CLR(TCPQueryOutcomeSocket, &ReadSet);
+								CLOSE_SOCKET(TCPQueryOutcomeSocket);
+							}
+
+							GetAddress( (ControlHeader *)RequestEntity,
+										DNS_QUARY_PROTOCOL_TCP,
+										&(NewAddress[0]),
+										&NewFamily
+										);
+							NewProxy[0] = AddressList_GetOne(TCPProxies, &ProxyFamily);
+							TCPQueryOutcomeSocket = ConnectToTCPServer(NewProxy, &ProxyFamily, "TCP proxy");
+							if( TCPQueryOutcomeSocket == INVALID_SOCKET )
+							{
+								AddressList_Advance(TCPProxies);
+								break;
+							}
+
+							ret = TCPProxyPreparation(TCPQueryOutcomeSocket, NewAddress[0], NewFamily);
+							if( ret != 0 )
+							{
+								CloseTCPConnection(TCPQueryOutcomeSocket);
+								TCPQueryOutcomeSocket = INVALID_SOCKET;
+								AddressList_Advance(TCPProxies);
+								break;
+							}
+
+							if( TCPQueryOutcomeSocket > MaxFd )
+							{
+								MaxFd = TCPQueryOutcomeSocket;
+							}
+
+							FD_SET(TCPQueryOutcomeSocket, &ReadSet);
+							TCPQueryOutcomeSocketLast = time(NULL);
+						}
+
+						TCPQueryActiveSocketPtr = &TCPQueryOutcomeSocket;
+						TCPQueryActiveSocketLastPtr = &TCPQueryOutcomeSocketLast;
+					}
+					/* Socket preparing done */
 
 					InternalInterface_QueryContextAddUDP(&Context, Header);
+/*
+					if( TCPProxies != NULL )
+					{
+						send(TCPQueryActiveSocketPtr, 0x47, 1, MSG_NOSIGNAL);
+					}
+*/
+					TCPRerequestLength = RecvState - sizeof(ControlHeader) + 2;
+					if( TCPRerequestLength > sizeof(TCPRerequest) )
+					{
+						ERRORMSG("Segment too large (902).\n");
+						break;
+					}
+					*TCPLength = htons(TCPRerequestLength - 2);
+					memcpy(TCPRerequest + 2, RequestEntity + sizeof(ControlHeader), TCPRerequestLength - 2);
 
-					TCPLength = htons(State - sizeof(ControlHeader));
-					send(TCPQueryOutcomeSocket, (const char *)&TCPLength, 2, MSG_NOSIGNAL);
-					send(TCPQueryOutcomeSocket, RequestEntity + sizeof(ControlHeader), State - sizeof(ControlHeader), MSG_NOSIGNAL);
+					SendState = TCPSend_Wrapper(*TCPQueryActiveSocketPtr, TCPRerequest, TCPRerequestLength);
+					if( SendState < 0 )
+					{
+						ShowSocketError("Sending to TCP server failed (912)", (-1) * SendState);
+						FD_CLR(*TCPQueryActiveSocketPtr, &ReadSet);
+						CloseTCPConnection(*TCPQueryActiveSocketPtr);
+						*TCPQueryActiveSocketPtr = INVALID_SOCKET;
+						AddressList_Advance(TCPProxies);
+						break;
+					} else {
+
+					}
 
 				} else {
-					int	State;
+					int			State;
 					uint16_t	TCPLength;
+					SOCKET		*ActiveSocket;
 
-					if( recv(TCPQueryOutcomeSocket, (char *)&TCPLength, 2, MSG_NOSIGNAL) < 2 )
+					if( FD_ISSET(*TCPQueryActiveSocketPtr, &ReadySet) )
 					{
-						CloseTCPConnection(TCPQueryOutcomeSocket);
-						FD_CLR(TCPQueryOutcomeSocket, &ReadSet);
-
-						INFO("Lost TCP connection to server.\n");
+						ActiveSocket = TCPQueryActiveSocketPtr;
+					} else if( FD_ISSET(TCPQueryOutcomeSocket, &ReadySet) ){
+						ActiveSocket = &TCPQueryOutcomeSocket;
+						TCPQueryActiveSocketLastPtr = &TCPQueryOutcomeSocketLast;
+					} else {
+						ActiveSocket = SocketPool_IsSet(&DedicatedSockets, &ReadySet, &TCPQueryActiveSocketLastPtr);
+						if( ActiveSocket == NULL )
+						{
+							ERRORMSG("Something wrong (1025).\n");
+							break;
+						}
+					}
+/*
+					if( TCPProxies != NULL )
+					{
+						char _0x72;
+						recv(TCPQueryActiveSocketPtr, _0x72, 1, MSG_NOSIGNAL);
+					}
+*/
+					if( recv(*ActiveSocket, (char *)&TCPLength, 2, MSG_NOSIGNAL) < 2 )
+					{
+						FD_CLR(*ActiveSocket, &ReadSet);
+                        CloseTCPConnection(*ActiveSocket);
+						*ActiveSocket = INVALID_SOCKET;
+                        INFO("TCP %s closed the connection.\n", TCPProxies == NULL ? "server" : "proxy");
 						break;
 					}
 
@@ -562,11 +1326,15 @@ int QueryDNSViaTCP(void)
 
 					if( TCPLength > sizeof(RequestEntity) - sizeof(ControlHeader) )
 					{
-						ClearTCPSocketBuffer(TCPQueryOutcomeSocket, TCPLength);
+						FD_CLR(*ActiveSocket, &ReadSet);
+						CloseTCPConnection(*ActiveSocket);
+						AddressChunk_Advance(&Addresses, DNS_QUARY_PROTOCOL_TCP);
+						*ActiveSocket = INVALID_SOCKET;
+						INFO("TCP stream is longer than the buffer, discarded.\n");
 						break;
 					}
 
-					State = recv(TCPQueryOutcomeSocket,
+					State = recv(*ActiveSocket,
 								RequestEntity + sizeof(ControlHeader),
 								TCPLength,
 								MSG_NOSIGNAL
@@ -574,12 +1342,19 @@ int QueryDNSViaTCP(void)
 
 					if( State != TCPLength )
 					{
-						CloseTCPConnection(TCPQueryOutcomeSocket);
-						FD_CLR(TCPQueryOutcomeSocket, &ReadSet);
+						FD_CLR(*ActiveSocket, &ReadSet);
+						CloseTCPConnection(*ActiveSocket);
+						AddressChunk_Advance(&Addresses, DNS_QUARY_PROTOCOL_TCP);
+						*ActiveSocket = INVALID_SOCKET;
+						INFO("TCP stream is too short, server may have some failures.\n");
 						break;
 					}
+					*TCPQueryActiveSocketLastPtr = time(NULL);
 
-					SendBack(SendBackSocket, Header, &Context, State + sizeof(ControlHeader), 'T', STATISTIC_TYPE_TCP, FALSE);
+					if( SendBack(SendBackSocket, Header, &Context, State + sizeof(ControlHeader), 'T', STATISTIC_TYPE_TCP, FALSE) <= 0 )
+					{
+						ERRORMSG("TCP sending back error (940).\n");
+					}
 				}
 		}
 	}
@@ -588,7 +1363,7 @@ int QueryDNSViaTCP(void)
 int InitBlockedIP(StringList *l)
 {
 	const char	*Itr = NULL;
-	uint32_t	Ip;
+	char	Ip[16];
 
 	if( l == NULL )
 	{
@@ -605,9 +1380,15 @@ int InitBlockedIP(StringList *l)
 
 	while( Itr != NULL )
 	{
-		IPv4AddressToNum(Itr, &Ip);
-
-		IpChunk_Add(IPMiscellaneous, Ip, IP_MISCELLANEOUS_TYPE_BLOCK, NULL, 0);
+		if( strchr(Itr, '.') != NULL )
+		{
+			IPv4AddressToNum(Itr, Ip);
+			IpChunk_Add(IPMiscellaneous, *(uint32_t *)Ip, IP_MISCELLANEOUS_TYPE_BLOCK, NULL, 0);
+		} else if( strchr(Itr, ':') != NULL )
+		{
+			IPv6AddressToNum(Itr, Ip);
+			IpChunk_Add6(IPMiscellaneous, Ip, IP_MISCELLANEOUS_TYPE_BLOCK, NULL, 0);
+		} else {}
 
 		Itr = StringList_GetNext(l, Itr);
 	}
@@ -656,26 +1437,25 @@ int InitIPSubstituting(StringList *l)
 	return 0;
 }
 
-static void SendQueryViaUDP(SOCKET		Socket,
-							const char	*RequestEntity,
-							int			EntityLength,
-							struct sockaddr	*Addresses_List,
-							int			NumberOfAddresses,
-							sa_family_t	Family
+static int SendQueryViaUDP(SOCKET			Socket,
+							const char		*RequestEntity,
+							int				EntityLength,
+							struct sockaddr	**Addresses_List,
+							sa_family_t		Family
 							)
 {
 	int		AddrLen = GetAddressLength(Family);
 
 	int		StateOfSending = 0;
 
-	while( NumberOfAddresses != 0 )
+	while( *Addresses_List != NULL )
 	{
-		StateOfSending |= (sendto(Socket, RequestEntity, EntityLength, 0, Addresses_List, AddrLen) > 0);
+		StateOfSending |= (sendto(Socket, RequestEntity, EntityLength, 0, *Addresses_List, AddrLen) > 0);
 
-		Addresses_List = (struct sockaddr *)(((char *)Addresses_List) + AddrLen);
-
-		--NumberOfAddresses;
+		++Addresses_List;
 	}
+
+	return StateOfSending;
 }
 
 static void UDPSwepOutput(QueryContextEntry *Entry, int Number)
@@ -702,19 +1482,20 @@ int QueryDNSViaUDP(void)
 	static fd_set	ReadSet, ReadySet;
 
 	static const struct timeval	LongTime = {3600, 0};
-	static const struct timeval	ShortTime = {2, 0};
+	static const struct timeval	ShortTime = {5, 0};
 
 	struct timeval	TimeLimit = LongTime;
 
 	int		MaxFd;
 
-	sa_family_t		LastFamily = ParallelMainFamily;
+    /* Infos of last used server. */
+	sa_family_t		LastFamily = UDPParallelMainFamily;
 
 	static char		RequestEntity[2048];
 	ControlHeader	*Header = (ControlHeader *)RequestEntity;
 
 	UDPQueryIncomeSocket =	InternalInterface_TryOpenLocal(10125, INTERNAL_INTERFACE_UDP_QUERY);
-	UDPQueryOutcomeSocket = InternalInterface_OpenASocket(ParallelMainFamily, NULL);
+	UDPQueryOutcomeSocket = InternalInterface_OpenASocket(LastFamily, NULL);
 
 	SendBackSocket = InternalInterface_GetSocket(INTERNAL_INTERFACE_UDP_INCOME);
 
@@ -738,9 +1519,22 @@ int QueryDNSViaUDP(void)
 		switch( select(MaxFd + 1, &ReadySet, NULL, NULL, &TimeLimit) )
 		{
 			case SOCKET_ERROR:
-				ERRORMSG("\n\n\n\n\n\n\n\n\n\n");
-				ERRORMSG(" !!!!! Something bad happend, please restert this program.\n");
-				while( TRUE ) SLEEP(100000);
+				{
+					int LastError = GET_LAST_ERROR();
+					ERRORMSG("SOCKET_ERROR Reached, 1510.\n");
+					if( FatalErrorDecideding(LastError) != 0 )
+					{
+						ERRORMSG("\n\n\n\n\n\n\n\n\n\n");
+						ERRORMSG(" !!!!! Something bad happend, this program will try to recovery after 10 seconds (1514). %d\n", LastError);
+						SLEEP(10000);
+
+						MaxFd = UDPQueryIncomeSocket > UDPQueryOutcomeSocket ? UDPQueryIncomeSocket : UDPQueryOutcomeSocket;
+						FD_ZERO(&ReadSet);
+						FD_ZERO(&ReadySet);
+						FD_SET(UDPQueryIncomeSocket, &ReadSet);
+						FD_SET(UDPQueryOutcomeSocket, &ReadSet);
+					}
+				}
 				break;
 
 			case 0:
@@ -760,15 +1554,14 @@ int QueryDNSViaUDP(void)
 				++NumberOfQueryBeforeSwep;
 				if( NumberOfQueryBeforeSwep > 1024 )
 				{
-					InternalInterface_QueryContextSwep(&Context, 2, UDPSwepOutput);
+					InternalInterface_QueryContextSwep(&Context, 5, UDPSwepOutput);
 					NumberOfQueryBeforeSwep = 0;
 				}
 
 				if( FD_ISSET(UDPQueryIncomeSocket, &ReadySet) )
 				{
 					int State;
-					struct sockaddr	*NewAddress;
-					int	NumberOfAddresses;
+					struct sockaddr	*NewAddress[2];
 					sa_family_t	NewFamily;
 
 					State = recvfrom(UDPQueryIncomeSocket,
@@ -784,7 +1577,7 @@ int QueryDNSViaUDP(void)
 						break;
 					}
 
-					if( UDPAppendEDNSOpt == TRUE && DNSGetAdditionalCount(RequestEntity + sizeof(ControlHeader)) == 0 )
+					if( AppendEDNSOpt == TRUE && DNSGetAdditionalCount(RequestEntity + sizeof(ControlHeader)) == 0 )
 					{
 						memcpy(RequestEntity + State, OptPseudoRecord, OPT_PSEUDORECORD_LENGTH);
 
@@ -795,41 +1588,78 @@ int QueryDNSViaUDP(void)
 
 					InternalInterface_QueryContextAddUDP(&Context, Header);
 
-					GetAddress((ControlHeader *)RequestEntity, DNS_QUARY_PROTOCOL_UDP, &NewAddress, &NumberOfAddresses, &NewFamily);
-
-					if( NewFamily != LastFamily )
-					{
-						if( UDPQueryOutcomeSocket != INVALID_SOCKET )
+					NewAddress[0] = AddressChunk_GetDedicated(&Addresses, &NewFamily, Header -> RequestingDomain, &(Header -> RequestingDomainHashValue));
+					/* If ParallelQuery is off or a dedicated server is specified, */
+					if( ParallelQuery == FALSE || NewAddress[0] != NULL )
+					{   /* then use the only one server */
+						if( NewAddress[0] == NULL )
 						{
-							FD_CLR(UDPQueryOutcomeSocket, &ReadSet);
-							CLOSE_SOCKET(UDPQueryOutcomeSocket);
+							NewAddress[0] = AddressChunk_GetOne(&Addresses, &NewFamily, DNS_QUARY_PROTOCOL_UDP);
 						}
 
-						UDPQueryOutcomeSocket = InternalInterface_OpenASocket(NewFamily, NULL);
-						if( UDPQueryOutcomeSocket == INVALID_SOCKET )
+						NewAddress[1] = NULL;
+
+						if( NewFamily != LastFamily )
 						{
-							LastFamily = AF_UNSPEC;
-							break;
+							if( UDPQueryOutcomeSocket != INVALID_SOCKET )
+							{
+								FD_CLR(UDPQueryOutcomeSocket, &ReadSet);
+								CLOSE_SOCKET(UDPQueryOutcomeSocket);
+							}
+
+							UDPQueryOutcomeSocket = InternalInterface_OpenASocket(NewFamily, NULL);
+							if( UDPQueryOutcomeSocket == INVALID_SOCKET )
+							{
+								LastFamily = AF_UNSPEC;
+								break;
+							}
+
+							LastFamily = NewFamily;
+							if( UDPQueryOutcomeSocket > MaxFd )
+							{
+								MaxFd = UDPQueryOutcomeSocket;
+							}
+							FD_SET(UDPQueryOutcomeSocket, &ReadSet);
 						}
 
-						LastFamily = NewFamily;
-						if( UDPQueryOutcomeSocket > MaxFd )
+						SendQueryViaUDP(UDPQueryOutcomeSocket,
+										RequestEntity + sizeof(ControlHeader),
+										State - sizeof(ControlHeader),
+										NewAddress,
+										NewFamily
+										);
+					} else {
+                        /* otherwise use those all servers. */
+                        if( LastFamily != UDPParallelMainFamily )
 						{
-							MaxFd = UDPQueryOutcomeSocket;
+							if( UDPQueryOutcomeSocket != INVALID_SOCKET )
+							{
+								FD_CLR(UDPQueryOutcomeSocket, &ReadSet);
+								CLOSE_SOCKET(UDPQueryOutcomeSocket);
+							}
+
+							UDPQueryOutcomeSocket = InternalInterface_OpenASocket(UDPParallelMainFamily, NULL);
+							if( UDPQueryOutcomeSocket == INVALID_SOCKET )
+							{
+								LastFamily = AF_UNSPEC;
+								break;
+							}
+
+							LastFamily = UDPParallelMainFamily;
+							if( UDPQueryOutcomeSocket > MaxFd )
+							{
+								MaxFd = UDPQueryOutcomeSocket;
+							}
+							FD_SET(UDPQueryOutcomeSocket, &ReadSet);
 						}
-						FD_SET(UDPQueryOutcomeSocket, &ReadSet);
+
+						SendQueryViaUDP(UDPQueryOutcomeSocket,
+										RequestEntity + sizeof(ControlHeader),
+										State - sizeof(ControlHeader),
+										UDPAddresses_Array,
+										UDPParallelMainFamily
+										);
 					}
-
-
-
-					SendQueryViaUDP(UDPQueryOutcomeSocket,
-									RequestEntity + sizeof(ControlHeader),
-									State - sizeof(ControlHeader),
-									NewAddress,
-									NumberOfAddresses,
-									NewFamily
-									);
-
 				} else {
 					int State;
 
@@ -846,108 +1676,11 @@ int QueryDNSViaUDP(void)
 						break;
 					}
 
-					SendBack(SendBackSocket, Header, &Context, State + sizeof(ControlHeader), 'U', STATISTIC_TYPE_UDP, UDPAntiPollution);
+					SendBack(SendBackSocket, Header, &Context, State + sizeof(ControlHeader), 'U', STATISTIC_TYPE_UDP, UDPFilter);
 				}
 			break;
 		}
 	}
-}
-
-int ProbeFakeAddresses(const char	*ServerAddress,
-					   const char	*RequestingDomain,
-					   StringList	*out
-					   )
-{
-	char	RequestEntity[384] = {
-		00, 00, /* QueryIdentifier */
-		01, 00, /* Flags */
-		00, 01, /* QuestionCount */
-		00, 00, /* AnswerCount */
-		00, 00, /* NameServerCount */
-		00, 00, /* AdditionalCount */
-		/* Header end */
-	};
-
-	struct sockaddr_in	PeerAddr;
-	SOCKET	Sock;
-
-	int		NumberOfAddresses = 0;
-
-	int		RequestLength;
-
-	int		AddrLen = sizeof(struct sockaddr);
-	char	NewlyReceived[2048];
-
-	if( DNSGenQuestionRecord(RequestEntity + 12, sizeof(RequestEntity) - 12, RequestingDomain, DNS_TYPE_NS, DNS_CLASS_IN) == 0 )
-	{
-		return -1;
-	}
-
-	FILL_ADDR4(PeerAddr, AF_INET, ServerAddress, 53);
-
-	Sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-	if( Sock == INVALID_SOCKET )
-	{
-		return -1;
-	}
-
-	SetSocketRecvTimeLimit(Sock, 2000);
-
-	RequestLength = 12 + strlen(RequestingDomain) + 2 + 4;
-
-	*(uint16_t *)RequestEntity = rand();
-
-	if( sendto(Sock, RequestEntity, RequestLength, 0, (struct sockaddr *)&PeerAddr, AddrLen) == 0 )
-	{
-		CLOSE_SOCKET(Sock);
-		return -1;
-	}
-
-	while( TRUE )
-	{
-		if( recvfrom(Sock, NewlyReceived, sizeof(NewlyReceived), 0, NULL, NULL) <= 0 )
-		{
-			break;
-		}
-
-		if( *(uint16_t *)RequestEntity != *(uint16_t *)NewlyReceived )
-		{
-			continue;
-		}
-
-		if( ((DNSHeader *)NewlyReceived) -> Flags.ResponseCode != 0 )
-		{
-			continue;
-		}
-
-		if( DNSGetAnswerCount(NewlyReceived) > 0 )
-		{
-			const char *FirstAnswer;
-
-			FirstAnswer = DNSGetAnswerRecordPosition(NewlyReceived, 1);
-
-			if( DNSGetRecordType(FirstAnswer) == DNS_TYPE_A )
-			{
-				NumberOfAddresses += GetHostsByRaw(NewlyReceived, out);
-
-				continue;
-			} else {
-				break;
-			}
-		}
-
-		if( DNSGetNameServerCount(NewlyReceived) == 0 && DNSGetAdditionalCount(NewlyReceived) == 0 )
-		{
-			continue;
-		}
-
-		break;
-	}
-
-	ClearSocketBuffer(Sock);
-
-	CLOSE_SOCKET(Sock);
-	return NumberOfAddresses;
 }
 
 int TestServer(struct TestServerArguments *Args)
@@ -1049,6 +1782,43 @@ int SetSocketRecvTimeLimit(SOCKET sock, int time)
 #else
 	struct timeval Time = {time / 1000, (time % 1000) * 1000};
 	return setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char *)&Time, sizeof(Time));
+#endif
+}
+
+int SetSocketNonBlock(SOCKET sock, BOOL NonBlocked)
+{
+#ifdef WIN32
+	unsigned long NonBlock = 1;
+
+	if( ioctlsocket(sock, FIONBIO, &NonBlock) != 0 )
+	{
+		return -1;
+	} else {
+		return 0;
+	}
+#else
+	int Flags;
+	int BlockFlag;
+
+	Flags = fcntl(sock, F_GETFL, 0);
+	if( Flags < 0 )
+	{
+		return -1;
+	}
+
+	if( NonBlocked == TRUE )
+	{
+        BlockFlag = O_NONBLOCK;
+	} else {
+        BlockFlag = ~O_NONBLOCK;
+	}
+
+	if( fcntl(sock, F_SETFL, Flags | BlockFlag) < 0 )
+	{
+		return -1;
+	}
+
+	return 0;
 #endif
 }
 

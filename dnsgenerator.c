@@ -8,7 +8,14 @@ const char OptPseudoRecord[] = {
 	0x00, 0x29,
 	0x05, 0x00,
 	0x00, 0x00, 0x00, 0x00,
-	0x00, 0x00
+	0x00, 0x00,
+/*
+	0x00, 0x08,
+	0x00, 0x08,
+	0x00, 0x01,
+	0x16, 0x00,
+	0x01, 0x01, 0x01, 0x01
+*/
 };
 
 /* Other Codes */
@@ -58,8 +65,7 @@ int DNSCompress(__inout char *DNSBody, __in int DNSBodyLength)
 	CurName = (char *)DNSGetAnswerRecordPosition(DNSBody, 1);
 
 	NameEnd = (char *)DNSJumpOverName(CurName);
-	*(unsigned char *)CurName = 0xC0;
-	*(unsigned char *)(CurName + 1) = (unsigned char)(LastName - DNSBody);
+	DNSLabelMakePointer(CurName, LastName - DNSBody);
 	DNSBodyLength -= (NameEnd - CurName) - 2;
 	memmove(CurName + 2, NameEnd, DNSEnd - NameEnd);
 	DNSEnd -= (NameEnd - CurName) - 2;
@@ -79,8 +85,7 @@ int DNSCompress(__inout char *DNSBody, __in int DNSBodyLength)
 		}
 
 		NameEnd = (char *)DNSJumpOverName(CurName);
-		*(unsigned char *)CurName = 0xC0;
-		*(unsigned char *)(CurName + 1) = (unsigned char)(LastData - DNSBody);
+		DNSLabelMakePointer(CurName, LastData - DNSBody);
 		DNSBodyLength -= (NameEnd - CurName) - 2;
 		memmove(CurName + 2, NameEnd, DNSEnd - NameEnd);
 		DNSEnd -= (NameEnd - CurName) - 2;
@@ -300,4 +305,31 @@ int DNSAppendAnswerRecord(__inout char *OriginBody, __in char *Record, __in int 
 	memcpy((void *)DNSJumpOverAnswerRecords(OriginBody), Record, RecordLength);
 	DNSSetAnswerCount(OriginBody, DNSGetAnswerCount(OriginBody) + 1);
 	return DNSJumpOverAnswerRecords(OriginBody) - OriginBody + RecordLength;
+}
+
+int DNSRemoveEDNSPseudoRecord(char *RequestContent, int *RequestLength)
+{
+	if( DNSGetAdditionalCount(RequestContent) == 1 )
+	{
+		const char *AdditionalRecords;
+		AdditionalRecords = DNSJumpOverQuestionRecords(RequestContent);
+		if( DNSGetRecordType(AdditionalRecords) == DNS_TYPE_OPT )
+		{
+			DNSSetAdditionalCount(RequestContent, 0);
+			*RequestLength -= (11 + AdditionalRecords[10]);
+
+			return EDNS_REMOVED;
+		} else {
+			return EDNS_NOT_EDNS;
+		}
+	} else {
+		return EDNS_NO_AR;
+	}
+}
+
+void DNSAppendEDNSPseudoRecord(char *RequestContent, int *RequestLength)
+{
+	memcpy((char *)RequestContent + *RequestLength, OptPseudoRecord, OPT_PSEUDORECORD_LENGTH);
+	DNSSetAdditionalCount(RequestContent, 1);
+	*RequestLength += OPT_PSEUDORECORD_LENGTH;
 }

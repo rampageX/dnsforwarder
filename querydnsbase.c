@@ -13,7 +13,6 @@
 #include "hosts.h"
 #include "utils.h"
 #include "excludedlist.h"
-#include "gfwlist.h"
 #include "stringlist.h"
 #include "domainstatistic.h"
 #include "request_response.h"
@@ -129,7 +128,7 @@ void ShowNormalMassage(const char *Agent, const char *RequestingDomain, const ch
 		GetCurDateAndTime(DateAndTime, sizeof(DateAndTime));
 
 		InfoBuffer[0] = '\0';
-		GetAllAnswers(Package, InfoBuffer, sizeof(InfoBuffer));
+		GetAllAnswers(Package, PackageLength, InfoBuffer, sizeof(InfoBuffer));
 
 		Type = (DNSRecordType)DNSGetRecordType(DNSJumpHeader(Package));
 	}
@@ -158,7 +157,7 @@ void ShowNormalMassage(const char *Agent, const char *RequestingDomain, const ch
 			  );
 }
 
-void ShowBlockedMessage(const char *RequestingDomain, const char *Package, const char *Message)
+void ShowBlockedMessage(const char *RequestingDomain, const char *Package, int PackageLength, const char *Message)
 {
 	char DateAndTime[32];
 	char InfoBuffer[1024];
@@ -168,7 +167,7 @@ void ShowBlockedMessage(const char *RequestingDomain, const char *Package, const
 		GetCurDateAndTime(DateAndTime, sizeof(DateAndTime));
 
 		InfoBuffer[0] = '\0';
-		GetAllAnswers(Package, InfoBuffer, sizeof(InfoBuffer));
+		GetAllAnswers(Package, PackageLength, InfoBuffer, sizeof(InfoBuffer));
 	}
 
 	if( ShowMassages == TRUE )
@@ -206,9 +205,7 @@ static int QueryFromServer(char *Content, int ContentLength, SOCKET ThisSocket)
 	int		Interface;
 
 	/* Determine whether the secondaries are used */
-	if(	IsExcludedDomain(Header -> RequestingDomain, &(Header -> RequestingDomainHashValue)) ||
-		GfwList_Match(Header -> RequestingDomain, &(Header -> RequestingDomainHashValue))
-		 )
+	if(	IsExcludedDomain(Header -> RequestingDomain, &(Header -> RequestingDomainHashValue)))
 	{
 		Interface = INTERNAL_INTERFACE_SECONDARY;
 	} else {
@@ -218,15 +215,39 @@ static int QueryFromServer(char *Content, int ContentLength, SOCKET ThisSocket)
 	return InternalInterface_SendTo(Interface, ThisSocket, Content, ContentLength);
 }
 
+#define DNS_FETCH_FROM_HOSTS_OK	0
+#define DNS_FETCH_FROM_HOSTS_NONE_RESULT	(-1)
+#define DNS_FETCH_FROM_HOSTS_DISABLE_IPV6	(-2)
 static int DNSFetchFromHosts(char *Content, int ContentLength, SOCKET ThisSocket)
 {
-	ControlHeader	*Header = (ControlHeader *)Content;
-
-	if( Hosts_Try(Header -> RequestingDomain, Header -> RequestingType) == TRUE )
+	switch ( Hosts_Try(Content, &ContentLength) )
 	{
-		return InternalInterface_SendTo(INTERNAL_INTERFACE_HOSTS, ThisSocket, Content, ContentLength);
-	} else {
-		return -1;
+		case MATCH_STATE_NONE:
+		case MATCH_STATE_DISABLED:
+			return DNS_FETCH_FROM_HOSTS_NONE_RESULT;
+			break;
+
+		case MATCH_STATE_DISABLE_IPV6:
+			return DNS_FETCH_FROM_HOSTS_DISABLE_IPV6;
+			break;
+
+		case MATCH_STATE_ONLY_CNAME:
+			if( InternalInterface_SendTo(INTERNAL_INTERFACE_HOSTS, ThisSocket, Content, ContentLength) > 0 )
+			{
+				return DNS_FETCH_FROM_HOSTS_OK;
+			} else {
+				return DNS_FETCH_FROM_HOSTS_NONE_RESULT;
+			}
+
+			break;
+
+		case MATCH_STATE_PERFECT:
+			return ContentLength;
+			break;
+
+		default:
+			return DNS_FETCH_FROM_HOSTS_NONE_RESULT;
+			break;
 	}
 }
 
@@ -258,7 +279,7 @@ int QueryBase(char *Content, int ContentLength, int BufferLength, SOCKET ThisSoc
 		/* First query from hosts and cache */
 		StateOfReceiving = DNSFetchFromHosts(Content, ContentLength, ThisSocket);
 
-		if( StateOfReceiving < 0 )
+		if( StateOfReceiving == DNS_FETCH_FROM_HOSTS_NONE_RESULT )
 		{
 			StateOfReceiving = DNSCache_FetchFromCache(RequestEntity, ContentLength - sizeof(ControlHeader), BufferLength - sizeof(ControlHeader));
 			if( StateOfReceiving > 0 )
@@ -267,8 +288,23 @@ int QueryBase(char *Content, int ContentLength, int BufferLength, SOCKET ThisSoc
 				DomainStatistic_Add(Header -> RequestingDomain, &(Header -> RequestingDomainHashValue), STATISTIC_TYPE_CACHE);
 				return StateOfReceiving;
 			}
+		} else if( StateOfReceiving == DNS_FETCH_FROM_HOSTS_DISABLE_IPV6 )
+		{
+			DomainStatistic_Add(Header -> RequestingDomain, &(Header -> RequestingDomainHashValue), STATISTIC_TYPE_REFUSED);
+			ShowRefusingMassage(Header -> Agent, Header -> RequestingType, Header -> RequestingDomain, "Disabled by hosts");
+			return QUERY_RESULT_DISABLE;
 		} else {
 			DomainStatistic_Add(Header -> RequestingDomain, &(Header -> RequestingDomainHashValue), STATISTIC_TYPE_HOSTS);
+			if( StateOfReceiving > 0 )
+			{
+				ShowNormalMassage(Header -> Agent,
+									Header -> RequestingDomain,
+									RequestEntity,
+									StateOfReceiving - sizeof(ControlHeader),
+									'H'
+									);
+				return StateOfReceiving;
+			}
 		}
 
 	} else {
@@ -285,39 +321,8 @@ int QueryBase(char *Content, int ContentLength, int BufferLength, SOCKET ThisSoc
 	{
 		return QUERY_RESULT_ERROR;
 	} else {
-		return QUERY_RESULT_SUCESS;
+		return QUERY_RESULT_SUCCESS;
 	}
-}
-
-int GetHostsByRaw(const char *RawPackage, StringList *out)
-{
-	int AnswerCount = DNSGetAnswerCount(RawPackage);
-
-	int loop;
-	const char *AnswerRecordPosition;
-	const char *DataPos;
-
-	int IpAddressCount = 0;
-
-	char Data[] = "               ";
-
-	for( loop = 1; loop <= AnswerCount; ++loop )
-	{
-		AnswerRecordPosition = DNSGetAnswerRecordPosition(RawPackage, loop);
-
-		if( DNSGetRecordType(AnswerRecordPosition) == DNS_TYPE_A )
-		{
-			DataPos = DNSGetResourceDataPos(AnswerRecordPosition);
-
-			DNSParseData(RawPackage, DataPos, 1, Data, sizeof(Data), DNS_RECORD_A, NUM_OF_DNS_RECORD_A, 1);
-
-			StringList_Add(out, Data, ',');
-
-			++IpAddressCount;
-		}
-	}
-
-	return IpAddressCount;
 }
 
 int GetMaximumMessageSize(SOCKET sock)

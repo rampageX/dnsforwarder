@@ -8,7 +8,6 @@
 #include "readconfig.h"
 #include "hosts.h"
 #include "excludedlist.h"
-#include "gfwlist.h"
 #include "utils.h"
 #include "domainstatistic.h"
 #include "debug.h"
@@ -55,6 +54,9 @@ int QueryDNSInterfaceInit(char *ConfigFile)
     ConfigAddOption(&ConfigInfo, "TCPServer", STRATEGY_APPEND_DISCARD_DEFAULT, TYPE_STRING, TmpTypeDescriptor, "TCP Server");
 
     TmpTypeDescriptor.str = NULL;
+    ConfigAddOption(&ConfigInfo, "TCPProxy", STRATEGY_APPEND_DISCARD_DEFAULT, TYPE_STRING, TmpTypeDescriptor, NULL);
+
+    TmpTypeDescriptor.str = NULL;
     ConfigAddOption(&ConfigInfo, "UDPServer", STRATEGY_APPEND_DISCARD_DEFAULT, TYPE_STRING, TmpTypeDescriptor, "UDP Server");
 
     TmpTypeDescriptor.boolean = FALSE;
@@ -64,13 +66,19 @@ int QueryDNSInterfaceInit(char *ConfigFile)
     ConfigAddOption(&ConfigInfo, "ExcludedDomain", STRATEGY_APPEND, TYPE_STRING, TmpTypeDescriptor, NULL);
 
     TmpTypeDescriptor.str = NULL;
+    ConfigAddOption(&ConfigInfo, "AlwaysTCP", STRATEGY_APPEND, TYPE_STRING, TmpTypeDescriptor, NULL);
+
+    TmpTypeDescriptor.str = NULL;
+    ConfigAddOption(&ConfigInfo, "AlwaysUDP", STRATEGY_APPEND, TYPE_STRING, TmpTypeDescriptor, NULL);
+
+    TmpTypeDescriptor.str = NULL;
     ConfigAddOption(&ConfigInfo, "ExcludedList", STRATEGY_APPEND, TYPE_PATH, TmpTypeDescriptor, NULL);
 
     TmpTypeDescriptor.boolean = FALSE;
-    ConfigAddOption(&ConfigInfo, "UDPAntiPollution", STRATEGY_DEFAULT, TYPE_BOOLEAN, TmpTypeDescriptor, "UDP Anti-pollution");
+    ConfigAddOption(&ConfigInfo, "UDPFilter", STRATEGY_DEFAULT, TYPE_BOOLEAN, TmpTypeDescriptor, "UDP Filter");
 
     TmpTypeDescriptor.boolean = FALSE;
-    ConfigAddOption(&ConfigInfo, "UDPAppendEDNSOpt", STRATEGY_DEFAULT, TYPE_BOOLEAN, TmpTypeDescriptor, NULL);
+    ConfigAddOption(&ConfigInfo, "AppendEDNSOpt", STRATEGY_DEFAULT, TYPE_BOOLEAN, TmpTypeDescriptor, NULL);
 
     TmpTypeDescriptor.str = NULL;
     ConfigAddOption(&ConfigInfo, "UDPBlock_IP", STRATEGY_APPEND, TYPE_STRING, TmpTypeDescriptor, NULL);
@@ -85,12 +93,20 @@ int QueryDNSInterfaceInit(char *ConfigFile)
     TmpTypeDescriptor.boolean = FALSE;
     ConfigAddOption(&ConfigInfo, "DomainStatistic", STRATEGY_DEFAULT, TYPE_BOOLEAN, TmpTypeDescriptor, NULL);
 
-    TmpTypeDescriptor.INT32 = 60;
-    ConfigAddOption(&ConfigInfo, "StatisticUpdateInterval", STRATEGY_DEFAULT, TYPE_INT32, TmpTypeDescriptor, NULL);
+	GetFileDirectory(TmpStr);
+	strcat(TmpStr, PATH_SLASH_STR);
+	strcat(TmpStr, "StatisticTemplate.html");
+    TmpTypeDescriptor.str = TmpStr;
+    ConfigAddOption(&ConfigInfo, "DomainStatisticTempletFile", STRATEGY_REPLACE, TYPE_PATH, TmpTypeDescriptor, NULL);
 
+	TmpTypeDescriptor.str = "<!-- INSERT HERE -->";
+	ConfigAddOption(&ConfigInfo, "StatisticInsertionPosition", STRATEGY_DEFAULT, TYPE_STRING, TmpTypeDescriptor, NULL);
+
+	TmpTypeDescriptor.INT32 = 60;
+	ConfigAddOption(&ConfigInfo, "StatisticUpdateInterval", STRATEGY_DEFAULT, TYPE_INT32, TmpTypeDescriptor, NULL);
 
     TmpTypeDescriptor.str = NULL;
-    ConfigAddOption(&ConfigInfo, "Hosts", STRATEGY_REPLACE, TYPE_PATH, TmpTypeDescriptor, "Hosts File");
+    ConfigAddOption(&ConfigInfo, "Hosts", STRATEGY_APPEND, TYPE_STRING, TmpTypeDescriptor, "Hosts File");
 
     TmpTypeDescriptor.INT32 = 18000;
     ConfigAddOption(&ConfigInfo, "HostsUpdateInterval", STRATEGY_DEFAULT, TYPE_INT32, TmpTypeDescriptor, NULL);
@@ -106,6 +122,9 @@ int QueryDNSInterfaceInit(char *ConfigFile)
 
     TmpTypeDescriptor.str = NULL;
     ConfigAddOption(&ConfigInfo, "HostsScript", STRATEGY_REPLACE, TYPE_PATH, TmpTypeDescriptor, NULL);
+
+    TmpTypeDescriptor.boolean = FALSE;
+    ConfigAddOption(&ConfigInfo, "DisableIpv6WhenIpv4Exists", STRATEGY_DEFAULT, TYPE_BOOLEAN, TmpTypeDescriptor, NULL);
 
     TmpTypeDescriptor.str = NULL;
     ConfigAddOption(&ConfigInfo, "AppendHosts", STRATEGY_APPEND, TYPE_STRING, TmpTypeDescriptor, NULL);
@@ -137,6 +156,9 @@ int QueryDNSInterfaceInit(char *ConfigFile)
     TmpTypeDescriptor.INT32 = 1;
     ConfigAddOption(&ConfigInfo, "MultipleTTL", STRATEGY_DEFAULT, TYPE_INT32, TmpTypeDescriptor, NULL);
 
+    TmpTypeDescriptor.str = NULL;
+    ConfigAddOption(&ConfigInfo, "CacheControl", STRATEGY_APPEND, TYPE_STRING, TmpTypeDescriptor, NULL);
+
     TmpTypeDescriptor.boolean = FALSE;
     ConfigAddOption(&ConfigInfo, "ReloadCache", STRATEGY_DEFAULT, TYPE_BOOLEAN, TmpTypeDescriptor, NULL);
 
@@ -153,28 +175,11 @@ int QueryDNSInterfaceInit(char *ConfigFile)
     TmpTypeDescriptor.str = NULL;
     ConfigAddOption(&ConfigInfo, "DisabledList", STRATEGY_APPEND, TYPE_PATH, TmpTypeDescriptor, NULL);
 
-
-    TmpTypeDescriptor.str = NULL;
-    ConfigAddOption(&ConfigInfo, "GfwList", STRATEGY_REPLACE, TYPE_STRING, TmpTypeDescriptor, "GFW List");
-
-    TmpTypeDescriptor.boolean = TRUE;
-    ConfigAddOption(&ConfigInfo, "GfwListBase64Decode", STRATEGY_DEFAULT, TYPE_BOOLEAN, TmpTypeDescriptor, NULL);
-
-    TmpTypeDescriptor.INT32 = 21600;
-    ConfigAddOption(&ConfigInfo, "GfwListUpdateInterval", STRATEGY_DEFAULT, TYPE_INT32, TmpTypeDescriptor, NULL);
-
-    TmpTypeDescriptor.INT32 = 30;
-    ConfigAddOption(&ConfigInfo, "GfwListRetryInterval", STRATEGY_DEFAULT, TYPE_INT32, TmpTypeDescriptor, NULL);
-
-	GetFileDirectory(TmpStr);
-	strcat(TmpStr, PATH_SLASH_STR);
-	strcat(TmpStr, "gfwlist.txt");
-    TmpTypeDescriptor.str = TmpStr;
-    ConfigAddOption(&ConfigInfo, "GfwListDownloadPath", STRATEGY_REPLACE, TYPE_PATH, TmpTypeDescriptor, NULL);
-
-
     TmpTypeDescriptor.INT32 = 0;
     ConfigAddOption(&ConfigInfo, "RefusingResponseCode", STRATEGY_DEFAULT, TYPE_INT32, TmpTypeDescriptor, NULL);
+
+    TmpTypeDescriptor.str = NULL;
+    ConfigAddOption(&ConfigInfo, "CheckIP", STRATEGY_APPEND, TYPE_STRING, TmpTypeDescriptor, NULL);
 
 	if( ConfigOpenFile(&ConfigInfo, ConfigFile) == 0 )
 	{
@@ -182,40 +187,51 @@ int QueryDNSInterfaceInit(char *ConfigFile)
 		ConfigCloseFile(&ConfigInfo);
 		return 0;
 	} else {
-		ERRORMSG("WARNING: Cannot load configuration file : %s, use default options. Use `-f' to specify another configure file.\n", ConfigFile);
+		ERRORMSG("WARNING: Cannot load configuration file : %s, using default options. Or use `-f' to specify other configure file.\n", ConfigFile);
 		return 0;
 	}
 }
 
-static int GetPrimaryProtocol(void)
+static DNSQuaryProtocol GetPrimaryProtocol(const char *FirstSet)
 {
-	const char *PrimaryProtocol_Ori = ConfigGetRawString(&ConfigInfo, "PrimaryServer");
-	char	PrimaryProtocol[8];
+	static DNSQuaryProtocol PrimaryProtocol = DNS_QUARY_PROTOCOL_UNSPECIFIED;
 
-	strncpy(PrimaryProtocol, PrimaryProtocol_Ori, 5);
-
-	StrToLower(PrimaryProtocol);
-
-	if( strncmp(PrimaryProtocol, "tcp", 3) == 0 )
+	if( PrimaryProtocol == DNS_QUARY_PROTOCOL_UNSPECIFIED )
 	{
-		return DNS_QUARY_PROTOCOL_TCP;
-	} else if( strncmp(PrimaryProtocol, "udp", 3) == 0 ) {
-		return DNS_QUARY_PROTOCOL_UDP;
-	} else {
-		ERRORMSG("PrimaryServer `%s' may not a good idea.\n", PrimaryProtocol_Ori);
-		return -1;
+		char	PrimaryProtocol_Str[8];
+
+		strncpy(PrimaryProtocol_Str, FirstSet, 5);
+
+		StrToLower(PrimaryProtocol_Str);
+
+		if( strncmp(PrimaryProtocol_Str, "tcp", 3) == 0 )
+		{
+			PrimaryProtocol =  DNS_QUARY_PROTOCOL_TCP;
+		} else if( strncmp(PrimaryProtocol_Str, "udp", 3) == 0 ) {
+			PrimaryProtocol =  DNS_QUARY_PROTOCOL_UDP;
+		} else {
+			ERRORMSG("PrimaryServer `%s' may not a good idea.\n", FirstSet);
+			PrimaryProtocol = DNS_QUARY_PROTOCOL_UNSPECIFIED;
+		}
 	}
+
+	return PrimaryProtocol;
 }
 
 int QueryDNSInterfaceStart(void)
 {
 	const char	*LocalAddr = ConfigGetRawString(&ConfigInfo, "LocalInterface");
 	int			LocalPort = ConfigGetInt32(&ConfigInfo, "LocalPort");
-	int			PrimaryProtocol = GetPrimaryProtocol();
+	DNSQuaryProtocol PrimaryProtocol = GetPrimaryProtocol(ConfigGetRawString(&ConfigInfo, "PrimaryServer"));
 
 	int			IsZeroZeroZeroZero;
 
 	Debug_Init(&ConfigInfo);
+
+	if( PrimaryProtocol == DNS_QUARY_PROTOCOL_UNSPECIFIED )
+	{
+		return -1;
+	}
 
 	if( ShowMassages == TRUE )
 	{
@@ -223,17 +239,15 @@ int QueryDNSInterfaceStart(void)
 		putchar('\n');
 	}
 
-	if( PrimaryProtocol < 0 )
-	{
-		return -1;
-	}
-
 	srand(time(NULL));
 
-	ExcludedList_Init(&ConfigInfo);
-	GfwList_Init(&ConfigInfo, FALSE);
+	ExcludedList_Init(&ConfigInfo, PrimaryProtocol);
 
 	InitAddress(&ConfigInfo);
+
+	InitCheckIPs(&ConfigInfo);
+
+	TCPProxies_Init(ConfigGetStringList(&ConfigInfo, "TCPProxy"));
 
 	if( InternalInterface_Init(PrimaryProtocol, LocalAddr, LocalPort) != 0 )
 	{
@@ -245,7 +259,7 @@ int QueryDNSInterfaceStart(void)
 
 	if( ConfigGetBoolean(&ConfigInfo, "DomainStatistic") == TRUE )
 	{
-		DomainStatistic_Init(ConfigGetInt32(&ConfigInfo, "StatisticUpdateInterval"));
+		DomainStatistic_Init(&ConfigInfo);
 	}
 
 	if( QueryDNSListenUDPInit(&ConfigInfo) != 0 )
@@ -270,20 +284,18 @@ int QueryDNSInterfaceStart(void)
 		DNSCache_Init(&ConfigInfo);
 	}
 
-	if( ConfigGetBoolean(&ConfigInfo, "UDPAntiPollution") == TRUE )
+	if( ConfigGetBoolean(&ConfigInfo, "UDPFilter") == TRUE )
 	{
-		SetUDPAntiPollution(TRUE);
-		SetUDPAppendEDNSOpt(ConfigGetBoolean(&ConfigInfo, "UDPAppendEDNSOpt"));
-
+		SetUDPFilter(TRUE);
 		InitBlockedIP(ConfigGetStringList(&ConfigInfo, "UDPBlock_IP"));
 		InitIPSubstituting(ConfigGetStringList(&ConfigInfo, "IPSubstituting"));
 	}
 
+	SetAppendEDNSOpt(ConfigGetBoolean(&ConfigInfo, "AppendEDNSOpt"));
+
 	TransferStart(TRUE);
 
 	DynamicHosts_Start(&ConfigInfo);
-
-	GfwList_PeriodicWork(&ConfigInfo);
 
 	IsZeroZeroZeroZero = !strncmp(LocalAddr, "0.0.0.0", 7);
 	INFO("Now you can set DNS%s%s.\n", IsZeroZeroZeroZero ? "" : " to ", IsZeroZeroZeroZero ? "" : LocalAddr);
@@ -300,15 +312,15 @@ void QueryDNSInterfaceWait(void)
 	if( ConfigGetBoolean(&ConfigInfo, "DomainStatistic") == TRUE )
 	{
 		DomainStatistic_Hold();
-	} else {
-		while(TRUE)
-		{
+	}
+
+	while(TRUE)
+	{
 #ifdef WIN32
-			SuspendThread(CurrentThread);
+		SuspendThread(CurrentThread);
 #else /* WIN32 */
-			pause();
+		pause();
 #endif /* WIN32 */
-		}
 	}
 
 #ifdef WIN32

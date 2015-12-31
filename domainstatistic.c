@@ -15,7 +15,7 @@ typedef struct _DomainInfo{
 	int		Cache;
 	int		Udp;
 	int		Tcp;
-	int		Spoofed;
+	int		BlockedMsg;
 } DomainInfo;
 
 typedef struct _RankList{
@@ -31,14 +31,62 @@ static int				Interval = 0;
 
 static FILE				*MainFile = NULL;
 
-static char				InitTime_Str[32];
-static time_t			InitTime_Num;
+static unsigned long int	InitTime_Num;
+
+static const char		*PreOutput = NULL; /* malloced */
+static const char		*PostOutput = NULL;
 
 volatile static BOOL	SkipStatistic = FALSE;
 
-
-int DomainStatistic_Init(int OutputInterval)
+static int GetPreAndPost(ConfigFileInfo *ConfigInfo)
 {
+	const char	*TemplateFile = ConfigGetRawString(ConfigInfo, "DomainStatisticTempletFile");
+	const char	*InsertionPosString = ConfigGetRawString(ConfigInfo, "StatisticInsertionPosition");
+	char	*ip = NULL;
+	int	FileSize;
+	char	*FileContent = NULL;
+	if( TemplateFile == NULL )
+	{
+		return -1;
+	}
+
+	FileSize = GetFileSizePortable(TemplateFile);
+	if( FileSize <= 0 )
+	{
+		return -1;
+	}
+
+	FileContent = SafeMalloc(FileSize + 1);
+	if( FileContent == NULL )
+	{
+		return -1;
+	}
+
+	memset(FileContent, 0, FileSize + 1);
+
+	if( GetTextFileContent(TemplateFile, FileContent) != 0 )
+	{
+		SafeFree(FileContent);
+		return -1;
+	}
+
+	ip = strstr(FileContent, InsertionPosString);
+	if( ip == NULL )
+	{
+		SafeFree(FileContent);
+		return -1;
+	}
+
+	PreOutput = FileContent;
+	PostOutput = ip + strlen(InsertionPosString);
+	*ip = '\0';
+
+	return 0;
+}
+
+int DomainStatistic_Init(ConfigFileInfo *ConfigInfo)
+{
+	int OutputInterval = ConfigGetInt32(ConfigInfo, "StatisticUpdateInterval");
 	char FilePath[1024];
 
 	if( OutputInterval < 1 )
@@ -46,15 +94,20 @@ int DomainStatistic_Init(int OutputInterval)
 		return 1;
 	}
 
+	if( GetPreAndPost(ConfigInfo) != 0 )
+	{
+		return 2;
+	}
+
 	GetFileDirectory(FilePath);
 	strcat(FilePath, PATH_SLASH_STR);
-	strcat(FilePath, "statistic.txt");
+	strcat(FilePath, "statistic.html");
 
 	MainFile = fopen(FilePath, "w");
 
 	if( MainFile == NULL )
 	{
-		return 2;
+		return 3;
 	}
 
 	EFFECTIVE_LOCK_INIT(StatisticLock);
@@ -62,8 +115,8 @@ int DomainStatistic_Init(int OutputInterval)
 
 	Interval = OutputInterval * 1000;
 
-	GetCurDateAndTime(InitTime_Str, sizeof(InitTime_Str));
 	InitTime_Num = time(NULL);
+	SkipStatistic = FALSE;
 
 	return 0;
 }
@@ -115,9 +168,9 @@ int DomainStatistic_Add(const char *Domain, int *HashValue, StatisticType Type)
 					NewInfo.Tcp = 1;
 					break;
 
-				case STATISTIC_TYPE_POISONED:
+				case STATISTIC_TYPE_BLOCKEDMSG:
 					NewInfo.Count = 0;
-					NewInfo.Spoofed = TRUE;
+					NewInfo.BlockedMsg = 1;
 					break;
 
 			}
@@ -153,8 +206,8 @@ int DomainStatistic_Add(const char *Domain, int *HashValue, StatisticType Type)
 						++(ExistInfo -> Tcp);
 						break;
 
-					case STATISTIC_TYPE_POISONED:
-						ExistInfo -> Spoofed = TRUE;
+					case STATISTIC_TYPE_BLOCKEDMSG:
+						++(ExistInfo -> BlockedMsg);
 						break;
 				}
 			}
@@ -167,31 +220,20 @@ int DomainStatistic_Add(const char *Domain, int *HashValue, StatisticType Type)
 	return 0;
 }
 
-static int CountCompare(const RankList *_1, const RankList *_2)
-{
-	return (-1) * (_1 -> Info -> Count - _2 -> Info -> Count);
-}
-
 int DomainStatistic_Hold(void)
 {
 	const char *Str;
 	int32_t Enum_Start;
 
 	DomainInfo *Info;
-
 	DomainInfo Sum;
-	RankList New;
-	int	DomainCount;
 
-	RankList *ARank;
+	unsigned long int GenerateTime_Num;
 
-	Array Ranks;
-	int Loop;
-
-	char GenerateTime_Str[32];
-	time_t GenerateTime_Num;
-
-	Array_Init(&Ranks, sizeof(RankList), 0, FALSE, NULL);
+	if( MainFile == NULL )
+	{
+		return 0;
+	}
 
 	while(TRUE)
 	{
@@ -201,113 +243,88 @@ int DomainStatistic_Hold(void)
 
 		memset(&Sum, 0, sizeof(DomainInfo));
 
-		Array_Clear(&Ranks);
-
-		GetCurDateAndTime(GenerateTime_Str, sizeof(GenerateTime_Str));
 		GenerateTime_Num = time(NULL);
 
+		fprintf(MainFile, "%s", PreOutput);
 		fprintf(MainFile,
-			    "-----------------------------------------\n"
-			    "Program startup time : %s\n"
-			    "Last statistic : %s\n"
-			    "Elapsed time : %ds\n"
-			    "\n"
-			    "Domain Statistic:\n"
-			    "                                                       Refused&Failed                     	Spoofed?\n"
-			    "                                                 Domain   Total     | Hosts Cache   UDP   TCP     |\n",
-			InitTime_Str,
-			GenerateTime_Str,
-			(int)(GenerateTime_Num - InitTime_Num)
-			);
-
-		DomainCount = 0;
+				"<script type=\"text/javascript\">"
+				"	var StartUpTime = %lu;"
+				"	var LastStatistic = %lu;"
+				"	var InfoArray = [",
+				InitTime_Num,
+				GenerateTime_Num
+				);
 
 		Enum_Start = 0;
 
 		EFFECTIVE_LOCK_GET(StatisticLock);
-
 		SkipStatistic = TRUE;
-
 		EFFECTIVE_LOCK_RELEASE(StatisticLock);
 
 		Str = StringChunk_Enum_NoWildCard(&MainChunk, &Enum_Start, (char **)&Info);
-
 		while( Str != NULL )
 		{
-			++DomainCount;
+			if( Info != NULL )
+			{
+				Sum.Count += Info -> Count;
+				Sum.Refused += Info -> Refused;
+				Sum.Hosts += Info -> Hosts;
+				Sum.Cache += Info -> Cache;
+				Sum.Udp += Info -> Udp;
+				Sum.Tcp += Info -> Tcp;
+				Sum.BlockedMsg += Info -> BlockedMsg;
 
-			New.Domain = Str;
-			New.Info = Info;
-
-			Array_PushBack(&Ranks, &New, NULL);
-
-			Sum.Count += Info -> Count;
-			Sum.Refused += Info -> Refused;
-			Sum.Hosts += Info -> Hosts;
-			Sum.Cache += Info -> Cache;
-			Sum.Udp += Info -> Udp;
-			Sum.Tcp += Info -> Tcp;
-			Sum.Spoofed += Info -> Spoofed;
+				fprintf(MainFile,
+						"{"
+							"Domain:\"%s\","
+							"Total:%d,"
+							"RaF:%d,"
+							"Hosts:%d,"
+							"Cache:%d,"
+							"UDP:%d,"
+							"TCP:%d,"
+							"BlockedMsg:%d"
+						"},",
+						Str,
+						Info -> Count,
+						Info -> Refused,
+						Info -> Hosts,
+						Info -> Cache,
+						Info -> Udp,
+						Info -> Tcp,
+						Info -> BlockedMsg
+						 );
+			}
 
 			Str = StringChunk_Enum_NoWildCard(&MainChunk, &Enum_Start, (char **)&Info);
-
-		}
-
-		Array_Sort(&Ranks, CountCompare);
-
-		Loop = 0;
-		ARank = Array_GetBySubscript(&Ranks, 0);
-
-		while( ARank != NULL )
-		{
-			fprintf(MainFile,
-					"%55s : %5d %5d %5d %5d %5d %5d %s\n",
-					ARank -> Domain,
-					ARank -> Info -> Count,
-					ARank -> Info -> Refused,
-					ARank -> Info -> Hosts,
-					ARank -> Info -> Cache,
-					ARank -> Info -> Udp,
-					ARank -> Info -> Tcp,
-					ARank -> Info -> Spoofed != FALSE ? "  Yes" : ""
-					 );
-
-			++Loop;
-			ARank = Array_GetBySubscript(&Ranks, Loop);
 		}
 
 		EFFECTIVE_LOCK_GET(StatisticLock);
-
 		SkipStatistic = FALSE;
-
 		EFFECTIVE_LOCK_RELEASE(StatisticLock);
 
-		fprintf(MainFile, "Total number of : Queried domains       : %d\n"
-						  "                  Requests              : %d\n"
-						  "                  Known spoofed domains : %d\n"
-						  "                  Refused&Failed        : %d\n"
-						  "                  Responses from hosts  : %d\n"
-						  "                  Responses from cache  : %d\n"
-						  "                  Responses via UDP     : %d\n"
-						  "                  Responses via TCP     : %d\n",
-				DomainCount,
+		fprintf(MainFile, "];");
+
+		fprintf(MainFile,
+				"var Sum = { Total		:	%d,"
+							"RaF		:	%d,"
+							"Hosts		:	%d,"
+							"Cache		:	%d,"
+							"UDP		:	%d,"
+							"TCP		:	%d,"
+							"BlockedMsg	:	%d"
+							"};"
+				"</script>",
 				Sum.Count,
-				Sum.Spoofed,
 				Sum.Refused,
 				Sum.Hosts,
 				Sum.Cache,
 				Sum.Udp,
-				Sum.Tcp
+				Sum.Tcp,
+				Sum.BlockedMsg
 				);
 
-		fprintf(MainFile, "Requests per minute : %.1f\n", (double)Sum.Count / (double)(GenerateTime_Num - InitTime_Num) * 60.0);
-
-		if( Sum.Udp + Sum.Tcp + Sum.Cache != 0 )
-		{
-			fprintf(MainFile, "Cache utilization : %.1f%%\n", ((double)Sum.Cache / (double)(Sum.Udp + Sum.Tcp + Sum.Cache)) * 100);
-		}
-
-		fprintf(MainFile, "\n-----------------------------------------\n");
+		fprintf(MainFile, "%s", PostOutput);
 
 		fflush(MainFile);
 	}

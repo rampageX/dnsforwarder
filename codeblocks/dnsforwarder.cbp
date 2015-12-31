@@ -5,13 +5,13 @@
 		<Option title="dnsforwarder" />
 		<Option pch_mode="2" />
 		<Option compiler="gcc" />
+		<Option virtualFolders="Others/;" />
 		<Build>
 			<Target title="Debug">
 				<Option output="/tmp/bin/Debug/dnsforwarder" prefix_auto="1" extension_auto="1" />
 				<Option object_output="/tmp/obj/Debug/" />
 				<Option type="1" />
 				<Option compiler="gcc" />
-				<Option parameters='-f &quot;/root/.dnsforwarder/config&quot;' />
 				<Compiler>
 					<Add option="-g" />
 				</Compiler>
@@ -21,23 +21,8 @@
 				<Option object_output="./obj/Release/" />
 				<Option type="1" />
 				<Option compiler="gcc" />
-				<Option parameters='-f &quot;/home/ho121/.dnsforwarder&quot;' />
 				<Compiler>
 					<Add option="-O2" />
-				</Compiler>
-				<Linker>
-					<Add option="-s" />
-				</Linker>
-			</Target>
-			<Target title="Release_InternalDebug">
-				<Option output="./bin/Release/dnsforwarder" prefix_auto="1" extension_auto="1" />
-				<Option object_output="./obj/Release/" />
-				<Option type="1" />
-				<Option compiler="gcc" />
-				<Option parameters='-f &quot;/home/ho121/.dnsforwarder&quot;' />
-				<Compiler>
-					<Add option="-O2" />
-					<Add option="-DINTERNAL_DEBUG" />
 				</Compiler>
 				<Linker>
 					<Add option="-s" />
@@ -57,6 +42,7 @@
 		<Linker>
 			<Add option="-lcurl -lssl -lcrypto -pthread" />
 		</Linker>
+		<Unit filename="../StatisticTemplate.html" />
 		<Unit filename="../addresschunk.c">
 			<Option compilerVar="CC" />
 		</Unit>
@@ -77,11 +63,20 @@
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="../cacheht.h" />
+		<Unit filename="../cachettlcrtl.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="../cachettlcrtl.h" />
+		<Unit filename="../checkip.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="../checkip.h" />
 		<Unit filename="../common.h" />
 		<Unit filename="../debug.c">
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="../debug.h" />
+		<Unit filename="../default.config" />
 		<Unit filename="../dnscache.c">
 			<Option compilerVar="CC" />
 		</Unit>
@@ -114,10 +109,6 @@
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="../extendablebuffer.h" />
-		<Unit filename="../gfwlist.c">
-			<Option compilerVar="CC" />
-		</Unit>
-		<Unit filename="../gfwlist.h" />
 		<Unit filename="../hosts.c">
 			<Option compilerVar="CC" />
 		</Unit>
@@ -166,6 +157,10 @@
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="../simpleht.h" />
+		<Unit filename="../socketpool.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="../socketpool.h" />
 		<Unit filename="../statichosts.c">
 			<Option compilerVar="CC" />
 		</Unit>
