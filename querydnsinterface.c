@@ -10,11 +10,12 @@
 #include "excludedlist.h"
 #include "utils.h"
 #include "domainstatistic.h"
+#include "goodiplist.h"
 #include "debug.h"
 
 static ConfigFileInfo	ConfigInfo;
 
-int QueryDNSInterfaceInit(char *ConfigFile)
+int QueryDNSInterfaceInit(char *ConfigFile, const char *Contexts)
 {
 	VType	TmpTypeDescriptor;
 	char	TmpStr[1024];
@@ -24,7 +25,7 @@ int QueryDNSInterfaceInit(char *ConfigFile)
 
 	SetProgramEnvironment("PROGRAMDIRECTORY", TmpStr);
 
-	ConfigInitInfo(&ConfigInfo);
+	ConfigInitInfo(&ConfigInfo, Contexts);
 
     TmpTypeDescriptor.boolean = FALSE;
     ConfigAddOption(&ConfigInfo, "LogOn", STRATEGY_DEFAULT, TYPE_BOOLEAN, TmpTypeDescriptor, NULL);
@@ -159,11 +160,12 @@ int QueryDNSInterfaceInit(char *ConfigFile)
     TmpTypeDescriptor.str = NULL;
     ConfigAddOption(&ConfigInfo, "CacheControl", STRATEGY_APPEND, TYPE_STRING, TmpTypeDescriptor, NULL);
 
-    TmpTypeDescriptor.boolean = FALSE;
+	TmpTypeDescriptor.boolean = FALSE;
     ConfigAddOption(&ConfigInfo, "ReloadCache", STRATEGY_DEFAULT, TYPE_BOOLEAN, TmpTypeDescriptor, NULL);
 
-    TmpTypeDescriptor.boolean = FALSE;
-    ConfigAddOption(&ConfigInfo, "OverwriteCache", STRATEGY_DEFAULT, TYPE_BOOLEAN, TmpTypeDescriptor, NULL);
+	TmpTypeDescriptor.boolean = FALSE;
+	ConfigAddOption(&ConfigInfo, "OverwriteCache", STRATEGY_DEFAULT, TYPE_BOOLEAN, TmpTypeDescriptor, NULL);
+
 
 
     TmpTypeDescriptor.str = NULL;
@@ -180,6 +182,12 @@ int QueryDNSInterfaceInit(char *ConfigFile)
 
     TmpTypeDescriptor.str = NULL;
     ConfigAddOption(&ConfigInfo, "CheckIP", STRATEGY_APPEND, TYPE_STRING, TmpTypeDescriptor, NULL);
+
+    TmpTypeDescriptor.str = NULL;
+    ConfigAddOption(&ConfigInfo, "GoodIPList", STRATEGY_APPEND, TYPE_STRING, TmpTypeDescriptor, NULL);
+
+    TmpTypeDescriptor.str = NULL;
+    ConfigAddOption(&ConfigInfo, "GoodIPListAddIP", STRATEGY_APPEND, TYPE_STRING, TmpTypeDescriptor, NULL);
 
 	if( ConfigOpenFile(&ConfigInfo, ConfigFile) == 0 )
 	{
@@ -210,7 +218,7 @@ static DNSQuaryProtocol GetPrimaryProtocol(const char *FirstSet)
 		} else if( strncmp(PrimaryProtocol_Str, "udp", 3) == 0 ) {
 			PrimaryProtocol =  DNS_QUARY_PROTOCOL_UDP;
 		} else {
-			ERRORMSG("PrimaryServer `%s' may not a good idea.\n", FirstSet);
+			ERRORMSG("PrimaryServer `%s' may not be a good idea.\n", FirstSet);
 			PrimaryProtocol = DNS_QUARY_PROTOCOL_UNSPECIFIED;
 		}
 	}
@@ -255,6 +263,7 @@ int QueryDNSInterfaceStart(void)
 		return -1;
 	}
 
+	GoodIpList_Init(&ConfigInfo);
 	DynamicHosts_Init(&ConfigInfo);
 
 	if( ConfigGetBoolean(&ConfigInfo, "DomainStatistic") == TRUE )
