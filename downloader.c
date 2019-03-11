@@ -12,7 +12,7 @@
 #endif /*  DOWNLOAD_LIBCURL */
 #endif /* WIN32 */
 
-#ifndef NODOWNLOAD
+#ifdef NODOWNLOAD
 #ifdef WIN32
 #else
 #include <limits.h>
