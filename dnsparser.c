@@ -2,161 +2,14 @@
 #include <memory.h>
 #include <string.h>
 #include <limits.h>
+#include "bst.h"
 #include "dnsparser.h"
 #include "dnsgenerator.h"
 #include "utils.h"
 
-const ElementDescriptor DNS_RECORD_A[] = {
-	{DNS_IPV4_ADDR, "IPv4 Address"}
-};
-
-const ElementDescriptor DNS_RECORD_AAAA[] = {
-	{DNS_IPV6_ADDR, "IPv6 Address"}
-};
-
-const ElementDescriptor DNS_RECORD_CNAME[] = {
-	{DNS_LABELED_NAME,	"Canonical Name"}
-};
-
-const ElementDescriptor DNS_RECORD_SOA[] = {
-	{DNS_LABELED_NAME,	"primary name server"},
-	{DNS_LABELED_NAME,	"responsible mail addr"},
-	{DNS_32BIT_UINT,	"serial"},
-	{DNS_32BIT_UINT,	"refresh"},
-	{DNS_32BIT_UINT,	"retry"},
-	{DNS_32BIT_UINT,	"expire"},
-	{DNS_32BIT_UINT,	"default TTL"},
-};
-
-const ElementDescriptor DNS_RECORD_DOMAIN_POINTER[] = {
-	{DNS_LABELED_NAME,	"name"}
-};
-
-const ElementDescriptor DNS_RECORD_NAME_SERVER[] = {
-	{DNS_LABELED_NAME,	"Name Server"}
-};
-
-const ElementDescriptor DNS_RECORD_MX[] = {
-	{DNS_16BIT_UINT,	"Preference"},
-	{DNS_LABELED_NAME,	"Mail Exchanger"}
-};
-
-const ElementDescriptor DNS_RECORD_TXT[] = {
-	{DNS_CHARACTER_STRING,	"TXT"}
-};
-
-const ElementDescriptor DNS_RECORD_DNSKEY[] = {
-	{DNS_DNSKEY_FLAGS,		"Flags"},
-	{DNS_DNSKEY_PROTOCOL,	"Protocol"},
-	{DNS_DNSKEY_ALGORITHM,	"Algorithm"},
-	{DNS_DNSKEY_PUBLIC_KEY,	"Public Key"}
-};
-
-const ElementDescriptor DNS_RECORD_RRSIG[] = {
-	{DNS_16BIT_UINT,		"Type Covered"},
-	{DNS_DNSKEY_ALGORITHM,	"Algorithm"},
-	{DNS_8BIT_UINT,			"Labels"},
-	{DNS_32BIT_UINT,		"Original TTL"},
-	{DNS_32BIT_UINT,		"Signature Expiration"},
-	{DNS_32BIT_UINT,		"Signature Inception"},
-	{DNS_16BIT_UINT,		"Key Tag"},
-	{DNS_LABELED_NAME,		"Signer's Name"},
-	{DNS_DNSSIG_SIGNATURE,	"Signature"}
-};
-
-static const struct _Type_Descriptor_DCount
-{
-	DNSRecordType			Type;
-	const ElementDescriptor	*Descriptor;
-	int						DCount;
-	BOOL					Cached;
-}Type_Descriptor_DCount[] = {
-	{DNS_TYPE_A,		DNS_RECORD_A,		NUM_OF_DNS_RECORD_A,		TRUE},
-	{DNS_TYPE_CNAME,	DNS_RECORD_CNAME,	NUM_OF_DNS_RECORD_CNAME,	TRUE},
-	{DNS_TYPE_AAAA,		DNS_RECORD_AAAA,	NUM_OF_DNS_RECORD_AAAA,		TRUE},
-	{DNS_TYPE_SOA,		DNS_RECORD_SOA,		NUM_OF_DNS_RECORD_SOA,		TRUE},
-	{DNS_TYPE_PTR,		DNS_RECORD_DOMAIN_POINTER,	NUM_OF_DNS_RECORD_DOMAIN_POINTER, TRUE},
-	{DNS_TYPE_NS,		DNS_RECORD_NAME_SERVER,	NUM_OF_DNS_RECORD_NAME_SERVER, TRUE},
-	{DNS_TYPE_MX,		DNS_RECORD_MX,		NUM_OF_DNS_RECORD_MX,		TRUE},
-	{DNS_TYPE_TXT,		DNS_RECORD_TXT,		NUM_OF_DNS_RECORD_TXT,		FALSE},
-	{DNS_TYPE_DNSKEY,	DNS_RECORD_DNSKEY,	NUM_OF_DNS_RECORD_DNSKEY,	TRUE},
-	{DNS_TYPE_RRSIG,	DNS_RECORD_RRSIG,	NUM_OF_DNS_RECORD_RRSIG,	FALSE}
-
-};
-
-int DNSGetDescriptor(DNSRecordType Type, BOOL NeededCache, const ElementDescriptor **Buffer)
-{
-	int loop;
-
-	for(loop = 0; loop != sizeof(Type_Descriptor_DCount) / sizeof(struct _Type_Descriptor_DCount); ++loop)
-	{
-		if( Type_Descriptor_DCount[loop].Type == Type )
-		{
-			if( NeededCache == TRUE && Type_Descriptor_DCount[loop].Cached == FALSE )
-			{
-				*Buffer = NULL;
-				return 0;
-			} else {
-				*Buffer = Type_Descriptor_DCount[loop].Descriptor;
-				return Type_Descriptor_DCount[loop].DCount;
-			}
-		}
-	}
-
-	*Buffer = NULL;
-	return 0;
-}
-
-BOOL DNSIsLabeledName(char *DNSBody, char *Start)
-{
-	return FALSE;
-}
-
-const char *DNSJumpOverName(const char *NameStart)
+char *DNSJumpOverName(char *NameStart)
 {
 	return NameStart + DNSGetHostName(NULL, INT_MAX, NameStart, NULL, 0);
-}
-
-const char *DNSGetQuestionRecordPosition(const char *DNSBody, int Num)
-{
-	const char *QR = DNSJumpHeader(DNSBody);
-	int QuestionCount = DNSGetQuestionCount(DNSBody);
-
-	if( Num < 1 )
-	{
-		return NULL;
-	}
-
-	if( Num > QuestionCount )
-	{
-		Num = QuestionCount + 1;
-	}
-
-	for(; Num != 1; --Num)
-		QR = DNSJumpOverName(QR) + 4;
-
-	return QR;
-}
-
-const char *DNSGetAnswerRecordPosition(const char *DNSBody, int Num)
-{
-	const char *SR = DNSJumpOverQuestionRecords(DNSBody);
-	int AnswerCount = DNSGetAnswerCount(DNSBody);
-
-	if( Num < 1 )
-	{
-		return NULL;
-	}
-
-	if( Num > AnswerCount )
-	{
-		Num = AnswerCount + 1;
-	}
-
-	for(; Num != 1; --Num)
-		SR = DNSJumpOverName(SR) + 10 + DNSGetResourceDataLength(SR);
-
-	return SR;
 }
 
 /* Labels length returned */
@@ -172,8 +25,11 @@ int DNSGetHostName(const char *DNSBody, int DNSBodyLength, const char *NameStart
 		if( DNSIsLabelPointerStart(LabelCount) )
 		{
 			int LabelPointer = 0;
-			LabelsLength += 2;
-			Redirected = TRUE;
+			if( Redirected == FALSE )
+            {
+                LabelsLength += 2;
+                Redirected = TRUE;
+            }
 			if( buffer == NULL )
 			{
 				break;
@@ -185,7 +41,9 @@ int DNSGetHostName(const char *DNSBody, int DNSBodyLength, const char *NameStart
 			}
 			NameItr = DNSBody + DNSLabelGetPointer(NameItr);
 		} else {
-			if( NameItr + LabelCount > DNSBody + DNSBodyLength )
+			if( DNSBody != NULL &&
+                NameItr + LabelCount > DNSBody + DNSBodyLength
+                )
 			{
 				return -1;
 			}
@@ -248,7 +106,8 @@ int DNSGetHostName(const char *DNSBody, int DNSBodyLength, const char *NameStart
 	return LabelsLength;
 }
 
-int DNSGetHostNameLength /* including terminated-zero */ (const char *DNSBody, int DNSBodyLength, const char *NameStart)
+/* including terminated-zero */
+int DNSGetHostNameLength(const char *DNSBody, int DNSBodyLength, const char *NameStart)
 {
 	const char *NameItr = NameStart;
 	int NameLength = 0;
@@ -287,464 +146,1236 @@ int DNSGetHostNameLength /* including terminated-zero */ (const char *DNSBody, i
 	}
 }
 
-DNSDataInfo DNSParseData(const char *DNSBody,
-						int DNSBodyLength,
-						const char *DataBody,
-						int DataLength,
-						void *Buffer,
-						int BufferLength,
-						const ElementDescriptor *Descriptor,
-						int CountOfDescriptor,
-						int Num)
+char *GetAllAnswers(char *DNSBody, int DNSBodyLength, char *Buffer, int BufferLength)
 {
-	DNSDataInfo Result = {DNS_DATA_TYPE_UNKNOWN, 0};
+    DnsSimpleParser p;
+    DnsSimpleParserIterator i;
+    int ANACount;
 
-	const char *PendingData = DataBody;
+    static const char *Tail = "   And       More ...\n";
+    char *BufferItr = Buffer;
+    int BufferLeft = BufferLength - strlen(Tail);
 
-	if( Num > CountOfDescriptor || DataLength <= 0 )
-		return Result;
+    if( BufferLeft <= 0 )
+    {
+        return NULL;
+    }
 
-	while(Num != 1)
-	{
-		switch(Descriptor -> element)
-		{
-			case DNS_LABELED_NAME:
-				PendingData = DNSJumpOverName(PendingData);
-				break;
+    if( DnsSimpleParser_Init(&p, DNSBody, DNSBodyLength, FALSE) != 0 )
+    {
+        return NULL;
+    }
 
-			case DNS_CHARACTER_STRING:
-				PendingData += strlen(PendingData) + 1;
-				break;
+    if( DnsSimpleParserIterator_Init(&i, &p) != 0 )
+    {
+        return NULL;
+    }
 
-			case DNS_IPV6_ADDR:
-				PendingData += 16;
-				break;
+    ANACount = p.AnswerCount(&p) + p.NameServerCount(&p) + p.AdditionalCount(&p);
 
-			case DNS_IPV4_ADDR:
-			case DNS_32BIT_UINT:
-				PendingData += 4;
-				break;
+    if( ANACount == 0 )
+    {
+        strcpy(BufferItr, "   Nothing.\n");
+    }
 
-			case DNS_DNSKEY_FLAGS:
-			case DNS_16BIT_UINT:
-				PendingData += 2;
-				break;
+    i.GotoAnswers(&i);
 
-			case DNS_DNSKEY_PROTOCOL:
-			case DNS_DNSKEY_ALGORITHM:
-			case DNS_8BIT_UINT:
-				PendingData += 1;
-				break;
+    while( i.Next(&i) != NULL &&
+           i.Purpose != DNS_RECORD_PURPOSE_QUESTION &&
+           i.Purpose != DNS_RECORD_PURPOSE_UNKNOWN
+         )
+    {
+        if( i.TextifyData(&i, "   %t:%v\n", BufferItr, BufferLeft) == 0 )
+        {
+            sprintf(BufferItr, "   And %d More ...\n", ANACount);
 
-			default:
-				return Result;
-				break;
-		}
+            break;
+        } else {
+            int StageLength = strlen(BufferItr);
 
-		--Num;
-		++Descriptor;
-	}
+            BufferItr += StageLength;
+            BufferLeft -= StageLength;
 
-	switch(Descriptor -> element)
-	{
-		case DNS_LABELED_NAME:
-			Result.DataLength = DNSGetHostNameLength(DNSBody, DNSBodyLength, PendingData);
-			if( BufferLength < Result.DataLength )
-				break;
+            --ANACount;
+        }
+    }
 
-			DNSGetHostName(DNSBody, INT_MAX, PendingData, (char *)Buffer, INT_MAX);
-			Result.DataType = DNS_DATA_TYPE_STRING;
-			break;
-
-		case DNS_CHARACTER_STRING:
-			if( BufferLength < GET_8_BIT_U_INT(PendingData) + 1 )
-			{
-				break;
-			}
-
-			memcpy(Buffer, PendingData + 1, GET_8_BIT_U_INT(PendingData));
-			((char *)Buffer)[GET_8_BIT_U_INT(PendingData)] = '\0';
-
-			Result.DataLength = GET_8_BIT_U_INT(PendingData) + 1;
-			Result.DataType = DNS_DATA_TYPE_STRING;
-
-			break;
-
-		case DNS_32BIT_UINT:
-			{
-				uint32_t Tmp = GET_32_BIT_U_INT(PendingData);
-				if(BufferLength < 4)
-					break;
-				memcpy(Buffer, &Tmp, 4);
-				Result.DataLength = 4;
-				Result.DataType = DNS_DATA_TYPE_UINT;
-			}
-			break;
-
-		case DNS_16BIT_UINT:
-			{
-				uint16_t Tmp = GET_16_BIT_U_INT(PendingData);
-				if(BufferLength < 2)
-					break;
-				memcpy(Buffer, &Tmp, 2);
-				Result.DataLength = 2;
-				Result.DataType = DNS_DATA_TYPE_UINT;
-			}
-			break;
-
-		case DNS_DNSKEY_PROTOCOL:
-		case DNS_8BIT_UINT:
-			if(BufferLength < 1)
-				break;
-			*(char *)Buffer = *PendingData;
-			Result.DataLength = 1;
-			Result.DataType = DNS_DATA_TYPE_UINT;
-			break;
-
-		case DNS_DNSKEY_FLAGS:
-			if( BufferLength < 17 )
-			{
-				break;
-			}
-
-			Result.DataLength = 17;
-			BinaryOutput(PendingData, 2, Buffer);
-			Result.DataType = DNS_DATA_TYPE_STRING;
-			break;
-
-		case DNS_DNSKEY_ALGORITHM:
-			{
-				const char *Name;
-
-				Name = DNSSECGetAlgorithmName(*PendingData);
-
-				if( BufferLength < strlen(Name) + 1 + 4 )
-				{
-					break;
-				}
-
-				Result.DataLength = sprintf(Buffer, "%d %s", (unsigned char)*PendingData, Name) + 1;
-				Result.DataType = DNS_DATA_TYPE_STRING;
-			}
-			break;
-
-		case DNS_DNSKEY_PUBLIC_KEY:
-			if( BufferLength < DataLength - 4 + 1 )
-			{
-				break;
-			}
-
-			Result.DataLength = DataLength - 4 + 1;
-			memcpy(Buffer, PendingData, DataLength - 4);
-			((char *)Buffer)[DataLength - 4] = '\0';
-			Result.DataType = DNS_DATA_TYPE_STRING;
-			break;
-
-		case DNS_DNSSIG_SIGNATURE:
-			if( BufferLength < sizeof("(      bytes binary object)") )
-			{
-				break;
-			}
-
-			Result.DataLength = sprintf(Buffer, "(%d bytes binary object)", (int)(DataLength - (PendingData - DataBody)));
-			Result.DataType = DNS_DATA_TYPE_STRING;
-
-			break;
-
-		case DNS_IPV4_ADDR:
-			if(BufferLength < 16)
-				break;
-			Result.DataLength =
-			sprintf((char *)Buffer, "%u.%u.%u.%u",	GET_8_BIT_U_INT(PendingData),
-											GET_8_BIT_U_INT(PendingData + 1),
-											GET_8_BIT_U_INT(PendingData + 2),
-											GET_8_BIT_U_INT(PendingData + 3)
-				);
-			Result.DataType = DNS_DATA_TYPE_STRING;
-			break;
-
-		case DNS_IPV6_ADDR:
-			if(BufferLength < 40)
-				break;
-			Result.DataLength =
-			sprintf((char *)Buffer, "%x:%x:%x:%x:%x:%x:%x:%x",	GET_16_BIT_U_INT(PendingData),
-														GET_16_BIT_U_INT(PendingData + 2),
-														GET_16_BIT_U_INT(PendingData + 4),
-														GET_16_BIT_U_INT(PendingData + 6),
-														GET_16_BIT_U_INT(PendingData + 8),
-														GET_16_BIT_U_INT(PendingData + 10),
-														GET_16_BIT_U_INT(PendingData + 12),
-														GET_16_BIT_U_INT(PendingData + 14)
-
-				);
-			Result.DataType = DNS_DATA_TYPE_STRING;
-			break;
-
-		default:
-			break;
-	}
-	return Result;
+    return Buffer;
 }
 
-char *GetAnswer(const char *DNSBody, int DNSBodyLength, const char *DataBody, int DataLength, char *Buffer, DNSRecordType ResourceType)
+/* Full label length returned, including terminated-zero */
+int DNSCopyLable(const char *DNSBody, char *here, const char *src)
 {
-	int loop2;
+    int FullLength = 0;
 
-	int DCount = 0;
-
-	const ElementDescriptor	*Descriptor;
-
-	if( Buffer == NULL )
-		return NULL;
-
-	DCount = DNSGetDescriptor(ResourceType, FALSE, &Descriptor);
-
-	if( Descriptor == NULL )
-	{
-		Buffer += sprintf(Buffer, "   Unparsable type : %d : %s\n", ResourceType, DNSGetTypeName(ResourceType));
-	} else {
-		char		InnerBuffer[512];
-		DNSDataInfo	Data;
-
-		Buffer += sprintf(Buffer, "   %s:", DNSGetTypeName(ResourceType));
-
-		if( DCount != 1 )
-		{
-			Buffer += sprintf(Buffer, "\n");
-		}
-
-		for(loop2 = 0; loop2 != DCount; ++loop2)
-		{
-			Data = DNSParseData(DNSBody,
-								DNSBodyLength,
-								DataBody,
-								DataLength,
-								InnerBuffer,
-								sizeof(InnerBuffer),
-								Descriptor,
-								DCount,
-								loop2 + 1);
-
-			if( DCount != 1 )
-			{
-				if( Descriptor[loop2].description != NULL )
-				{
-					Buffer += sprintf(Buffer, "      %s:", Descriptor[loop2].description);
-				}
-			}
-
-			switch(Data.DataType)
-			{
-				case DNS_DATA_TYPE_INT:
-					if(Data.DataLength == 1)
-						Buffer += sprintf(Buffer, "%d", (int)*(char *)InnerBuffer);
-
-					if(Data.DataLength == 2)
-						Buffer += sprintf(Buffer, "%d", (int)*(int16_t *)InnerBuffer);
-
-					if(Data.DataLength == 4)
-						Buffer += sprintf(Buffer, "%u", *(int32_t *)InnerBuffer);
-
-					break;
-
-				case DNS_DATA_TYPE_UINT:
-					if(Data.DataLength == 1)
-						Buffer += sprintf(Buffer, "%d", (int)*(unsigned char *)InnerBuffer);
-
-					if(Data.DataLength == 2)
-						Buffer += sprintf(Buffer, "%d", (int)*(uint16_t *)InnerBuffer);
-
-					if(Data.DataLength == 4)
-						Buffer += sprintf(Buffer, "%u", *(uint32_t *)InnerBuffer);
-
-					break;
-
-				case DNS_DATA_TYPE_STRING:
-					Buffer += sprintf(Buffer, "%s", InnerBuffer);
-					break;
-
-				default:
-					break;
-			}
-
-			if( Descriptor[loop2].description != NULL )
-			{
-				Buffer += sprintf(Buffer, "\n");
-			}
-		}
-	}
-
-	return Buffer;
-}
-
-char *GetAllAnswers(const char *DNSBody, int DNSBodyLength, char *Buffer, size_t BufferLength)
-{
-	int		AnswerCount;
-	const char	*Itr;
-	int		UsedCount;
-	DNSRecordType	ResourceType;
-
-	char TempBuffer[1024];
-	int RecordLength;
-
-	if( BufferLength < strlen("   And       More ...\n") )
-	{
-		return NULL;
-	}
-
-	AnswerCount = DNSGetAnswerCount(DNSBody) + DNSGetNameServerCount(DNSBody);
-
-	if( AnswerCount == 0 )
-	{
-		strcpy(Buffer, "   Nothing.\n");
-		return Buffer + strlen("   Nothing.\n");
-	}
-
-	BufferLength -= strlen("   And       More ...\n");
-
-	UsedCount = 0;
-
-	while(UsedCount != AnswerCount){
-		Itr = DNSGetAnswerRecordPosition(DNSBody, UsedCount + 1);
-
-		ResourceType = (DNSRecordType)DNSGetRecordType(Itr);
-
-		RecordLength = GetAnswer(DNSBody, DNSBodyLength, DNSGetResourceDataPos(Itr), DNSGetResourceDataLength(Itr), TempBuffer, ResourceType) - TempBuffer;
-
-		if( RecordLength < BufferLength )
-		{
-			strcpy(Buffer, TempBuffer);
-			BufferLength -= RecordLength;
-			Buffer += RecordLength;
-		} else {
-			break;
-		}
-
-		++UsedCount;
-	}
-	if( UsedCount < AnswerCount )
-	{
-		Buffer += sprintf(Buffer, "   And %d More ...\n", AnswerCount - UsedCount);
-	}
-	return Buffer;
-}
-
-int DNSExpand(char *DNSBody, int BufferLength)
-{
-	return -1;
-}
-
-void DNSCopyLable(const char *DNSBody, char *here, const char *src)
-{
-	while( 1 )
+	while( TRUE )
 	{
 		if( DNSIsLabelPointerStart(GET_8_BIT_U_INT(src)) )
 		{
 			src = DNSBody + DNSLabelGetPointer(src);
 		} else {
-			*here = *src;
+		    ++FullLength;
 
-			if( *src == 0 )
+		    if( here != NULL )
+            {
+                *here = *src;
+                ++here;
+            }
+
+			if( *src == '\0' )
 			{
 				break;
 			}
 
-			++here;
 			++src;
 		}
 	}
+
+	return FullLength;
 }
 
-int DNSExpandCName_MoreSpaceNeeded(const char *DNSBody, int DNSBodyLength)
+/**
+  New Implementation
+*/
+
+/* Converted to host byte order */
+static uint16_t DnsSimpleParser_QueryIdentifier(DnsSimpleParser *p)
 {
-	int				AnswerCount	=	DNSGetAnswerCount(DNSBody);
-	int				Itr	=	1;
-	int				MoreSpaceNeeded = 0;
-	const char		*Answer;
-	DNSRecordType	Type;
-	const char		*Resource;
-	int				ResourceLength;
-
-	int				NameLength;
-
-	if( AnswerCount < 1 )
-	{
-		return 0;
-	}
-
-	do
-	{
-		Answer = DNSGetAnswerRecordPosition(DNSBody, Itr);
-
-		Type = DNSGetRecordType(Answer);
-		if( Type == DNS_TYPE_CNAME )
-		{
-			ResourceLength = DNSGetResourceDataLength(Answer);
-			Resource = DNSGetResourceDataPos(Answer);
-			NameLength = DNSGetHostNameLength(DNSBody, DNSBodyLength, Resource);
-			if( NameLength == INT_MAX )
-			{
-				return INT_MAX;
-			}
-
-			MoreSpaceNeeded += (NameLength + 1) - ResourceLength;
-		}
-
-		++Itr;
-
-	}while( Itr <= AnswerCount );
-
-	return MoreSpaceNeeded;
+    return DNSGetQueryIdentifier(p->RawDns);
 }
 
-/* You should meke sure there is no additional record and nameserver record */
-void DNSExpandCName(const char *DNSBody, int DNSBodyLength)
+static DnsDirection DnsSimpleParser_Flags_Direction(DnsSimpleParser *p)
 {
-	int				AnswerCount	=	DNSGetAnswerCount(DNSBody);
-	int				Itr	=	1;
-	const char		*Answer;
-	DNSRecordType	Type;
-	char			*Resource;
-	int				ResourceLength;
+    return (DnsDirection)(p->_Flags.Flags->Direction);
+}
 
-	int				NameLength;
-	char			*NameEnd; /* After terminated-zero */
+static DnsOperation DnsSimpleParser_Flags_Operation(DnsSimpleParser *p)
+{
+    return (DnsOperation)(p->_Flags.Flags->Type);
+}
 
-	char			*DNSEnd;
+static BOOL DnsSimpleParser_Flags_IsAuthoritative(DnsSimpleParser *p)
+{
+    return !!(p->_Flags.Flags->AuthoritativeAnswer);
+}
 
+static BOOL DnsSimpleParser_Flags_Truncated(DnsSimpleParser *p)
+{
+    return !!(p->_Flags.Flags->TrunCation);
+}
 
-	if( AnswerCount < 1 )
-	{
-		return;
-	}
+static BOOL DnsSimpleParser_Flags_RecursionDesired(DnsSimpleParser *p)
+{
+    return !!(p->_Flags.Flags->RecursionDesired);
+}
 
-	do
-	{
-		Answer = DNSGetAnswerRecordPosition(DNSBody, Itr);
+static BOOL DnsSimpleParser_Flags_RecursionAvailable(DnsSimpleParser *p)
+{
+    return !!(p->_Flags.Flags->RecursionAvailable);
+}
 
-		Type = DNSGetRecordType(Answer);
-		if( Type == DNS_TYPE_CNAME )
-		{
-			ResourceLength = DNSGetResourceDataLength(Answer);
-			Resource = (char *)DNSGetResourceDataPos(Answer);
-			NameLength = DNSGetHostNameLength(DNSBody, DNSBodyLength, Resource);
-			if( NameLength == INT_MAX )
-			{
-				return;
-			}
+static ResponseCode DnsSimpleParser_Flags_ResponseCode(DnsSimpleParser *p)
+{
+    return (ResponseCode)(p->_Flags.Flags->ResponseCode);
+}
 
-			NameEnd = Resource + ResourceLength;
+static int DnsSimpleParser_QuestionCount(DnsSimpleParser *p)
+{
+    return DNSGetQuestionCount(p->RawDns);
+}
 
-			DNSEnd = (char *)DNSGetAnswerRecordPosition(DNSBody, AnswerCount + 1);
+static int DnsSimpleParser_AnswerCount(DnsSimpleParser *p)
+{
+    return DNSGetAnswerCount(p->RawDns);
+}
 
-			SET_16_BIT_U_INT(Resource - 2, NameLength + 1);
+static int DnsSimpleParser_NameServerCount(DnsSimpleParser *p)
+{
+    return DNSGetNameServerCount(p->RawDns);
+}
 
-			memmove(Resource + NameLength + 1, NameEnd, DNSEnd - NameEnd);
+static int DnsSimpleParser_AdditionalCount(DnsSimpleParser *p)
+{
+    return DNSGetAdditionalCount(p->RawDns);
+}
 
-			DNSCopyLable(DNSBody, Resource, Resource);
-		}
+static BOOL DnsSimpleParser_HasType(DnsSimpleParser *p,
+                                    DnsRecordPurpose Purpose,
+                                    DNSRecordClass Klass,
+                                    DNSRecordType Type
+                                    )
+{
+    DnsSimpleParserIterator i;
 
-		++Itr;
+    if( DnsSimpleParserIterator_Init(&i, p) != 0 )
+    {
+        return FALSE;
+    }
 
-	}while( Itr <= AnswerCount );
+    while( i.Next(&i) != NULL )
+    {
+        if( (Purpose == DNS_RECORD_PURPOSE_UNKNOWN || i.Purpose == Purpose) &&
+            (Klass == DNS_CLASS_UNKNOWN || i.Klass == Klass) &&
+             i.Type == Type
+             )
+        {
+            return TRUE;
+        }
+    }
+
+    return FALSE;
+}
+
+int DnsSimpleParser_Init(DnsSimpleParser *p,
+                         char *RawDns,
+                         int Length,
+                         BOOL IsTcp)
+{
+    if( RawDns == NULL || Length < DNS_HEADER_LENGTH )
+    {
+        return -1;
+    }
+
+    if( IsTcp )
+    {
+        p->RawDns = RawDns + 2;
+        p->RawDnsLength = Length - 2;
+    } else {
+        p->RawDns = RawDns;
+        p->RawDnsLength = Length;
+    }
+
+    p->_Flags.Flags = (DNSFlags *)(p->RawDns + 2);
+
+    p->QueryIdentifier = DnsSimpleParser_QueryIdentifier;
+
+    p->_Flags.Direction = DnsSimpleParser_Flags_Direction;
+    p->_Flags.Operation = DnsSimpleParser_Flags_Operation;
+    p->_Flags.IsAuthoritative = DnsSimpleParser_Flags_IsAuthoritative;
+    p->_Flags.Truncated = DnsSimpleParser_Flags_Truncated;
+    p->_Flags.RecursionDesired = DnsSimpleParser_Flags_RecursionDesired;
+    p->_Flags.RecursionAvailable = DnsSimpleParser_Flags_RecursionAvailable;
+    p->_Flags.ResponseCode = DnsSimpleParser_Flags_ResponseCode;
+
+    p->QuestionCount = DnsSimpleParser_QuestionCount;
+    p->AnswerCount = DnsSimpleParser_AnswerCount;
+    p->NameServerCount = DnsSimpleParser_NameServerCount;
+    p->AdditionalCount = DnsSimpleParser_AdditionalCount;
+    p->HasType = DnsSimpleParser_HasType;
+
+    return 0;
+}
+
+/**
+  Iterator
+*/
+static DnsRecordPurpose DnsSimpleParserIterator_DeterminePurpose(
+                                                    DnsSimpleParserIterator *i,
+                                                    int RecordPosition)
+{
+    if( i->QuestionFirst != 0 &&
+        RecordPosition >= i->QuestionFirst &&
+        RecordPosition <= i->QuestionLast
+      )
+    {
+        return DNS_RECORD_PURPOSE_QUESTION;
+    }
+
+    if( i->AnswerFirst != 0 &&
+        RecordPosition >= i->AnswerFirst &&
+        RecordPosition <= i->AnswerLast
+      )
+    {
+        return DNS_RECORD_PURPOSE_ANSWER;
+    }
+
+    if( i->NameServerFirst != 0 &&
+        RecordPosition >= i->NameServerFirst &&
+        RecordPosition <= i->NameServerLast
+      )
+    {
+        return DNS_RECORD_PURPOSE_NAME_SERVER;
+    }
+
+    if( i->AdditionalFirst != 0 &&
+        RecordPosition >= i->AdditionalFirst &&
+        RecordPosition <= i->AdditionalLast
+      )
+    {
+        return DNS_RECORD_PURPOSE_ADDITIONAL;
+    }
+
+    return DNS_RECORD_PURPOSE_UNKNOWN;
+}
+
+static char *DnsSimpleParserIterator_Next(DnsSimpleParserIterator *i)
+{
+    if( i->CurrentPosition == NULL )
+    {
+        i->CurrentPosition = i->Parser->RawDns + DNS_HEADER_LENGTH;
+        i->RecordPosition = 1;
+    } else if( i->RecordPosition < i->AllRecordCount ){
+        /* The record length excluding its labeled name at the beginning. */
+        int ExLength = i->Purpose == DNS_RECORD_PURPOSE_QUESTION ?
+                       /* For a question record, there are only 4 bytes */
+                       4 :
+                       /* For an other types of record, there are many things */
+                       10 + i->DataLength;
+
+        /* The length of all labels in the beginning of current record
+           plus `ExLength'
+         */
+
+        int FullLength = DNSGetHostName(NULL,
+                                            INT_MAX,
+                                            i->CurrentPosition,
+                                            NULL,
+                                            0)
+                         + ExLength;
+
+        if( FullLength < ExLength )
+        {
+            return NULL;
+        }
+
+        i->CurrentPosition += FullLength;
+
+        i->RecordPosition += 1;
+    } else {
+        i->CurrentPosition = NULL;
+        i->RecordPosition = 0;
+        return NULL;
+    }
+
+    if( (i->RecordPosition > i->AllRecordCount) ||
+        (i->CurrentPosition - i->Parser->RawDns > i->Parser->RawDnsLength)
+      )
+    {
+        i->CurrentPosition = NULL;
+        i->RecordPosition = 0;
+        return NULL;
+    }
+
+    /* Update record informations */
+    i->Purpose =  DnsSimpleParserIterator_DeterminePurpose(i, i->RecordPosition);
+    i->Type = DNSGetRecordType(i->CurrentPosition);
+    i->Klass = DNSGetRecordClass(i->CurrentPosition);
+
+    if( i->Purpose != DNS_RECORD_PURPOSE_UNKNOWN &&
+        i->Type != DNS_TYPE_UNKNOWN &&
+        i->Klass != DNS_CLASS_UNKNOWN
+      )
+    {
+        if( i->Purpose != DNS_RECORD_PURPOSE_QUESTION )
+        {
+            i->DataLength = DNSGetResourceDataLength(i->CurrentPosition);
+        }
+
+        return i->CurrentPosition;
+    } else {
+        i->CurrentPosition = NULL;
+        i->RecordPosition = 0;
+        return NULL;
+    }
+}
+
+static void DnsSimpleParserIterator_GotoAnswers(DnsSimpleParserIterator *i)
+{
+    i->CurrentPosition = NULL;
+
+    if( i->QuestionFirst > 0 )
+    {
+        while( DnsSimpleParserIterator_Next(i) != NULL )
+        {
+            if( i->RecordPosition == i->QuestionLast )
+            {
+                break;
+            }
+        }
+    }
+}
+
+static int DnsSimpleParserIterator_GetName(DnsSimpleParserIterator *i,
+                                       char *Buffer, /* Could be NULL */
+                                       int BufferLength
+                                       )
+{
+    return DNSGetHostName(i->Parser->RawDns,
+                          i->Parser->RawDnsLength,
+                          i->CurrentPosition,
+                          Buffer,
+                          BufferLength
+                          );
+}
+
+static int DnsSimpleParserIterator_GetNameLength(DnsSimpleParserIterator *i)
+{
+    return DNSGetHostNameLength(i->Parser->RawDns,
+                                i->Parser->RawDnsLength,
+                                i->CurrentPosition
+                                );
+}
+
+static char *DnsSimpleParserIterator_RowData(DnsSimpleParserIterator *i)
+{
+    if( i->Purpose != DNS_RECORD_PURPOSE_QUESTION )
+    {
+        return DNSGetResourceDataPos(i->CurrentPosition);
+    } else {
+        return NULL;
+    }
+}
+
+/* Number of items generated returned */
+static int DnsSimpleParserIterator_ParseIPv4(DnsSimpleParserIterator *i,
+                                          const char *Data,
+                                          int DataLength,
+                                          const char *Format, /* "%t:%v\n" */
+                                          char *Buffer,
+                                          int BufferLength,
+                                          const char *Text,
+                                          int *AcutalDataLength
+                                          )
+{
+    char Example[LENGTH_OF_IPV4_ADDRESS_ASCII];
+
+    if( DataLength < 4 || strlen(Format) + 1 > BufferLength )
+    {
+        return 0;
+    }
+
+    if( Text == NULL )
+    {
+        Text = "";
+    }
+
+    strcpy(Buffer, Format);
+
+    if( ReplaceStr_WithLengthChecking(Buffer,
+                                      "%t",
+                                      Text,
+                                      BufferLength
+                                      )
+       == NULL )
+    {
+        *Buffer = '\0';
+        return 0;
+    }
+
+    IPv4AddressToAsc(Data, Example);
+
+    if( ReplaceStr_WithLengthChecking(Buffer,
+                                      "%v",
+                                      Example,
+                                      BufferLength
+                                      )
+       == NULL )
+    {
+        *Buffer = '\0';
+        return 0;
+    }
+
+    if( AcutalDataLength != NULL )
+    {
+        *AcutalDataLength = 4;
+    }
+
+    return 1;
+}
+
+static int DnsSimpleParserIterator_ParseA(DnsSimpleParserIterator *i,
+                                          const char *Data,
+                                          int DataLength,
+                                          const char *Format, /* "%t:%v\n" */
+                                          char *Buffer,
+                                          int BufferLength
+                                          )
+{
+    return DnsSimpleParserIterator_ParseIPv4(i,
+                                             Data,
+                                             DataLength,
+                                             Format,
+                                             Buffer,
+                                             BufferLength,
+                                             "IPv4 Address",
+                                             NULL
+                                             );
+}
+
+static int DnsSimpleParserIterator_ParseIPv6(DnsSimpleParserIterator *i,
+                                          const char *Data,
+                                          int DataLength,
+                                          const char *Format, /* "%t:%v\n" */
+                                          char *Buffer,
+                                          int BufferLength,
+                                          const char *Text,
+                                          int *AcutalDataLength
+                                          )
+{
+    char Example[LENGTH_OF_IPV6_ADDRESS_ASCII];
+
+    if( DataLength < 16 || strlen(Format) + 1 > BufferLength )
+    {
+        return 0;
+    }
+
+    if( Text == NULL )
+    {
+        Text = "";
+    }
+
+    strcpy(Buffer, Format);
+
+    if( ReplaceStr_WithLengthChecking(Buffer,
+                                      "%t",
+                                      Text,
+                                      BufferLength
+                                      )
+       == NULL )
+    {
+        *Buffer = '\0';
+        return 0;
+    }
+
+    IPv6AddressToAsc(Data, Example);
+
+    if( ReplaceStr_WithLengthChecking(Buffer,
+                                      "%v",
+                                      Example,
+                                      BufferLength
+                                      )
+       == NULL )
+    {
+        *Buffer = '\0';
+        return 0;
+    }
+
+    if( AcutalDataLength != NULL )
+    {
+        *AcutalDataLength = 16;
+    }
+
+    return 1;
+}
+
+static int DnsSimpleParserIterator_ParseAAAA(DnsSimpleParserIterator *i,
+                                          const char *Data,
+                                          int DataLength,
+                                          const char *Format, /* "%t:%v\n" */
+                                          char *Buffer,
+                                          int BufferLength
+                                          )
+{
+    return DnsSimpleParserIterator_ParseIPv6(i,
+                                             Data,
+                                             DataLength,
+                                             Format,
+                                             Buffer,
+                                             BufferLength,
+                                             "IPv6 Address",
+                                             NULL
+                                             );
+}
+
+static int DnsSimpleParserIterator_ParseLabeledName(DnsSimpleParserIterator *i,
+                                                   const char *Data,
+                                                   int DataLength,
+                                             const char *Format, /* "%t:%v\n" */
+                                                   char *Buffer,
+                                                   int BufferLength,
+                                                   const char *Text,
+                                                   int *AcutalDataLength
+                                                   )
+{
+    /* Static max length assumed to be 127+1 */
+    char Example[128];
+    char *Resulting;
+
+    int HostNameLength; /* Including terminated-zero */
+    int LabelLength;
+
+    if( strlen(Format) + 1 > BufferLength )
+    {
+        return 0;
+    }
+
+    if( Text == NULL )
+    {
+        Text = "";
+    }
+
+    strcpy(Buffer, Format);
+
+    if( ReplaceStr_WithLengthChecking(Buffer,
+                                      "%t",
+                                      Text,
+                                      BufferLength
+                                      )
+       == NULL )
+    {
+        *Buffer = '\0';
+        return 0;
+    }
+
+    HostNameLength = DNSGetHostNameLength(i->Parser->RawDns,
+                                          i->Parser->RawDnsLength,
+                                          Data
+                                          );
+
+    if( HostNameLength == INT_MAX )
+    {
+        *Buffer = '\0';
+        return 0;
+    }
+
+    if( HostNameLength > sizeof(Example) )
+    {
+        Resulting = SafeMalloc(HostNameLength);
+    } else {
+        Resulting = Example;
+    }
+
+    LabelLength = DNSGetHostName(i->Parser->RawDns,
+                                 i->Parser->RawDnsLength,
+                                 Data,
+                                 Resulting,
+                                 HostNameLength
+                                 );
+
+    if( LabelLength < 0 )
+    {
+        if( Resulting != Example )
+        {
+            SafeFree(Resulting);
+        }
+
+        *Buffer = '\0';
+        return 0;
+    }
+
+    if( ReplaceStr_WithLengthChecking(Buffer,
+                                      "%v",
+                                      Resulting,
+                                      BufferLength
+                                      )
+       == NULL )
+    {
+        if( Resulting != Example )
+        {
+            SafeFree(Resulting);
+        }
+
+        *Buffer = '\0';
+        return 0;
+    }
+
+    if( Resulting != Example )
+    {
+        SafeFree(Resulting);
+    }
+
+    if( AcutalDataLength != NULL )
+    {
+        *AcutalDataLength = LabelLength;
+    }
+
+    return 1;
+}
+
+static int DnsSimpleParserIterator_ParseCName(DnsSimpleParserIterator *i,
+                                              const char *Data,
+                                              int DataLength,
+                                             const char *Format, /* "%t:%v\n" */
+                                              char *Buffer,
+                                              int BufferLength
+                                              )
+{
+    return DnsSimpleParserIterator_ParseLabeledName(i,
+                                                    Data,
+                                                    DataLength,
+                                                    Format,
+                                                    Buffer,
+                                                    BufferLength,
+                                                    "Canonical Name",
+                                                    NULL
+                                                    );
+}
+
+static int DnsSimpleParserIterator_Parse32Uint(DnsSimpleParserIterator *i,
+                                               const char *Data,
+                                               int DataLength,
+                                             const char *Format, /* "%t:%v\n" */
+                                               char *Buffer,
+                                               int BufferLength,
+                                               const char *Text,
+                                               int *AcutalDataLength
+                                               )
+{
+    char Example[] = "4294967295";
+    uint32_t    u;
+
+    if( DataLength < 4 || strlen(Format) + 1 > BufferLength )
+    {
+        return 0;
+    }
+
+    if( Text == NULL )
+    {
+        Text = "";
+    }
+
+    strcpy(Buffer, Format);
+
+    if( ReplaceStr_WithLengthChecking(Buffer,
+                                      "%t",
+                                      Text,
+                                      BufferLength
+                                      )
+       == NULL )
+    {
+        *Buffer = '\0';
+        return 0;
+    }
+
+    u = GET_32_BIT_U_INT(Data);
+
+    sprintf(Example, "%u", u);
+
+    if( ReplaceStr_WithLengthChecking(Buffer,
+                                      "%v",
+                                      Example,
+                                      BufferLength
+                                      )
+       == NULL )
+    {
+        *Buffer = '\0';
+        return 0;
+    }
+
+    if( AcutalDataLength != NULL )
+    {
+        *AcutalDataLength = 4;
+    }
+
+    return 1;
+}
+
+static int DnsSimpleParserIterator_Parse16Uint(DnsSimpleParserIterator *i,
+                                               const char *Data,
+                                               int DataLength,
+                                             const char *Format, /* "%t:%v\n" */
+                                               char *Buffer,
+                                               int BufferLength,
+                                               const char *Text,
+                                               int *AcutalDataLength
+                                               )
+{
+    char Example[] = "4294967295";
+    uint32_t    u;
+
+    if( DataLength < 2 || strlen(Format) + 1 > BufferLength )
+    {
+        return 0;
+    }
+
+    if( Text == NULL )
+    {
+        Text = "";
+    }
+
+    strcpy(Buffer, Format);
+
+    if( ReplaceStr_WithLengthChecking(Buffer,
+                                      "%t",
+                                      Text,
+                                      BufferLength
+                                      )
+       == NULL )
+    {
+        *Buffer = '\0';
+        return 0;
+    }
+
+    u = GET_16_BIT_U_INT(Data);
+
+    sprintf(Example, "%d", (int)u);
+
+    if( ReplaceStr_WithLengthChecking(Buffer,
+                                      "%v",
+                                      Example,
+                                      BufferLength
+                                      )
+       == NULL )
+    {
+        *Buffer = '\0';
+        return 0;
+    }
+
+    if( AcutalDataLength != NULL )
+    {
+        *AcutalDataLength = 2;
+    }
+
+    return 1;
+}
+
+static int DnsSimpleParserIterator_ParseSingleTxt(DnsSimpleParserIterator *i,
+                                                  const char *Data,
+                                                  int DataLength,
+                                             const char *Format, /* "%t:%v\n" */
+                                                  char *Buffer,
+                                                  int BufferLength,
+                                                  const char *Text,
+                                                  int *AcutalDataLength
+                                               )
+{
+    /* Static max length assumed to be 127+1 */
+    char Example[128];
+    char *Resulting;
+
+    int StringLength = GET_8_BIT_U_INT(Data);
+
+    if( strlen(Format) + 1 > BufferLength )
+    {
+        return 0;
+    }
+
+    if( Text == NULL )
+    {
+        Text = "";
+    }
+
+    strcpy(Buffer, Format);
+
+    if( ReplaceStr_WithLengthChecking(Buffer,
+                                      "%t",
+                                      Text,
+                                      BufferLength
+                                      )
+       == NULL )
+    {
+        *Buffer = '\0';
+        return 0;
+    }
+
+    if( StringLength + 1 > sizeof(Example) )
+    {
+        Resulting = SafeMalloc(StringLength + 1);
+    } else {
+        Resulting = Example;
+    }
+
+    memcpy(Resulting, Data + 1, StringLength);
+    Resulting[StringLength] = '\0';
+
+    if( ReplaceStr_WithLengthChecking(Buffer,
+                                      "%v",
+                                      Resulting,
+                                      BufferLength
+                                      )
+       == NULL )
+    {
+        *Buffer = '\0';
+
+        if( Resulting != Example )
+        {
+            SafeFree(Resulting);
+        }
+        return 0;
+    }
+
+    if( AcutalDataLength != NULL )
+    {
+        *AcutalDataLength = StringLength + 1;
+    }
+
+    if( Resulting != Example )
+    {
+        SafeFree(Resulting);
+    }
+    return 1;
+}
+
+typedef int (*Parser)(DnsSimpleParserIterator *i,
+                      const char *Data,
+                      int DataLength,
+                      const char *Format, /* "%t:%v\n" */
+                      char *Buffer,
+                      int BufferLength,
+                      const char *Text,
+                      int *AcutalDataLength
+                      );
+
+typedef struct {
+    const char *Text;
+    Parser ps;
+} ParserProjector;
+
+static int DnsSimpleParserIterator_ParseData(DnsSimpleParserIterator *i,
+                                              const char *Data,
+                                              int DataLength,
+                                             const char *Format, /* "%t:%v\n" */
+                                              char *Buffer,
+                                              int BufferLength,
+                                              const ParserProjector *pp
+                                              )
+{
+    int n = 0;
+
+    const char *DataItr = Data;
+    int LeftDataLength = DataLength;
+
+    char *BufferItr = Buffer;
+    int LeftBufferLength = BufferLength;
+
+    while( pp[n].Text != NULL )
+    {
+        int Stage;
+        int ActualLength;
+        Stage = pp[n].ps(i,
+                         DataItr,
+                         LeftDataLength,
+                         Format,
+                         BufferItr,
+                         LeftBufferLength,
+                         pp[n].Text,
+                         &ActualLength
+                         );
+        if( Stage <= 0 )
+        {
+            break;
+        } else {
+            int ResultLength = strlen(BufferItr);
+
+            BufferItr += ResultLength;
+            LeftBufferLength -= ResultLength;
+
+            DataItr += ActualLength;
+            LeftDataLength -= ActualLength;
+            ++n;
+        }
+    }
+
+    return n;
+}
+
+static int DnsSimpleParserIterator_ParseSOA(DnsSimpleParserIterator *i,
+                                              const char *Data,
+                                              int DataLength,
+                                             const char *Format, /* "%t:%v\n" */
+                                              char *Buffer,
+                                              int BufferLength
+                                              )
+{
+    ParserProjector pp[] = {
+        {"(SOA)primary name server", DnsSimpleParserIterator_ParseLabeledName},
+        {"(SOA)responsible mail addr", DnsSimpleParserIterator_ParseLabeledName},
+        {"(SOA)serial", DnsSimpleParserIterator_Parse32Uint},
+        {"(SOA)refresh", DnsSimpleParserIterator_Parse32Uint},
+        {"(SOA)retry", DnsSimpleParserIterator_Parse32Uint},
+        {"(SOA)expire", DnsSimpleParserIterator_Parse32Uint},
+        {"(SOA)default TTL", DnsSimpleParserIterator_Parse32Uint},
+
+        {NULL, NULL},
+    };
+
+    return DnsSimpleParserIterator_ParseData(i,
+                                             Data,
+                                             DataLength,
+                                             Format,
+                                             Buffer,
+                                             BufferLength,
+                                             pp
+                                             ) == 7 ? 7 : 0;
+}
+
+static int DnsSimpleParserIterator_ParseDomainPtr(DnsSimpleParserIterator *i,
+                                                  const char *Data,
+                                                  int DataLength,
+                                             const char *Format, /* "%t:%v\n" */
+                                                  char *Buffer,
+                                                  int BufferLength
+                                                  )
+{
+    return DnsSimpleParserIterator_ParseLabeledName(i,
+                                                    Data,
+                                                    DataLength,
+                                                    Format,
+                                                    Buffer,
+                                                    BufferLength,
+                                                    "name",
+                                                    NULL
+                                                    );
+}
+
+static int DnsSimpleParserIterator_ParseNameServer(DnsSimpleParserIterator *i,
+                                                   const char *Data,
+                                                   int DataLength,
+                                             const char *Format, /* "%t:%v\n" */
+                                                   char *Buffer,
+                                                   int BufferLength
+                                                   )
+{
+    return DnsSimpleParserIterator_ParseLabeledName(i,
+                                                    Data,
+                                                    DataLength,
+                                                    Format,
+                                                    Buffer,
+                                                    BufferLength,
+                                                    "Name Server",
+                                                    NULL
+                                                    );
+}
+
+static int DnsSimpleParserIterator_ParseMailEx(DnsSimpleParserIterator *i,
+                                               const char *Data,
+                                               int DataLength,
+                                             const char *Format, /* "%t:%v\n" */
+                                               char *Buffer,
+                                               int BufferLength
+                                               )
+{
+    ParserProjector pp[] = {
+        {"preference", DnsSimpleParserIterator_Parse16Uint},
+        {"mail exchanger", DnsSimpleParserIterator_ParseLabeledName},
+
+        {NULL, NULL},
+    };
+
+    return DnsSimpleParserIterator_ParseData(i,
+                                             Data,
+                                             DataLength,
+                                             Format,
+                                             Buffer,
+                                             BufferLength,
+                                             pp
+                                             ) == 2 ? 2 : 0;
+}
+
+static int DnsSimpleParserIterator_ParseTxt(DnsSimpleParserIterator *i,
+                                            const char *Data,
+                                            int DataLength,
+                                            const char *Format, /* "%t:%v\n" */
+                                            char *Buffer,
+                                            int BufferLength
+                                            )
+{
+    const char *DataItr = Data;
+    int DataLeft = DataLength;
+
+    char *BufferItr = Buffer;
+    int BufferLeft = BufferLength;
+
+    int n = 0;
+
+    while( DataItr < Data + DataLength )
+    {
+        int Stage;
+        int ActualLength;
+
+        Stage = DnsSimpleParserIterator_ParseSingleTxt(i,
+                                                       DataItr,
+                                                       DataLeft,
+                                                       Format,
+                                                       BufferItr,
+                                                       BufferLeft,
+                                                       "TXT",
+                                                       &ActualLength
+                                                       );
+
+        if( Stage <= 0 )
+        {
+            break;
+        } else {
+            int StageLength = strlen(BufferItr);
+
+            DataItr += ActualLength;
+            DataLeft -= ActualLength;
+
+            BufferItr += StageLength;
+            BufferLeft -= StageLength;
+
+            ++n;
+        }
+    }
+
+    return n;
+}
+
+static int DnsSimpleParserIterator_Unparsable(const char *Format, /* "%t:%v\n" */
+                                              char *Buffer,
+                                              int BufferLength,
+                                              DNSRecordType Type
+                                              )
+{
+    char a[] = "4294967295";
+
+    strcpy(Buffer, Format);
+
+    if( ReplaceStr_WithLengthChecking(Buffer,
+                                      "%t",
+                                      "Unparsable type",
+                                      BufferLength
+                                      )
+       == NULL )
+    {
+        return 0;
+    }
+
+    sprintf(a, "%d", (int)Type);
+
+    if( ReplaceStr_WithLengthChecking(Buffer,
+                                      "%v",
+                                      a,
+                                      BufferLength
+                                      )
+       == NULL )
+    {
+        return 0;
+    }
+
+    return 1;
+}
+
+/* Number of items generated returned */
+static int DnsSimpleParserIterator_TextifyData(DnsSimpleParserIterator *i,
+                                             const char *Format, /* "%t:%v\n" */
+                                               char *Buffer,
+                                               int BufferLength
+                                               )
+{
+    const char *Data = DNSGetResourceDataPos(i->CurrentPosition);
+
+    int (*RecordParser)(DnsSimpleParserIterator *i,
+                        const char *Data,
+                        int DataLength,
+                        const char *Format, /* "%t:%v\n" */
+                        char *Buffer,
+                        int BufferLength
+                        ) = NULL;
+
+    if( i->Type != DNS_TYPE_OPT &&
+        i->Klass != DNS_CLASS_IN
+        )
+    {
+        return 0; /* Unparsable */
+    }
+
+    switch( i->Type )
+    {
+    case DNS_TYPE_A:
+        RecordParser = DnsSimpleParserIterator_ParseA;
+        break;
+
+    case DNS_TYPE_AAAA:
+        RecordParser = DnsSimpleParserIterator_ParseAAAA;
+        break;
+
+    case DNS_TYPE_CNAME:
+        RecordParser = DnsSimpleParserIterator_ParseCName;
+        break;
+
+    case DNS_TYPE_PTR:
+        RecordParser = DnsSimpleParserIterator_ParseDomainPtr;
+        break;
+
+    case DNS_TYPE_SOA:
+        RecordParser = DnsSimpleParserIterator_ParseSOA;
+        break;
+
+    case DNS_TYPE_TXT:
+        RecordParser = DnsSimpleParserIterator_ParseTxt;
+        break;
+
+    case DNS_TYPE_MX:
+        RecordParser = DnsSimpleParserIterator_ParseMailEx;
+        break;
+
+    case DNS_TYPE_NS:
+        RecordParser = DnsSimpleParserIterator_ParseNameServer;
+        break;
+
+    default:
+        RecordParser = NULL;
+        break;
+    }
+
+    if( RecordParser != NULL )
+    {
+        return RecordParser(i,
+                            Data,
+                            i->DataLength,
+                            Format,
+                            Buffer,
+                            BufferLength
+                            );
+    } else {
+        return DnsSimpleParserIterator_Unparsable(Format,
+                                                  Buffer,
+                                                  BufferLength,
+                                                  i->Type
+                                                  );
+    }
+}
+
+static uint32_t DnsSimpleParserIterator_GetTTL(DnsSimpleParserIterator *i)
+{
+    return DNSGetTTL(i->CurrentPosition);
+}
+
+int DnsSimpleParserIterator_Init(DnsSimpleParserIterator *i, DnsSimpleParser *p)
+{
+    int QuestionCount, AnswerCount, NameServerCount, AdditionalCount;
+
+    if( i == NULL || p == NULL )
+    {
+        return -1;
+    }
+
+    QuestionCount = p->QuestionCount(p);
+    AnswerCount = p->AnswerCount(p);
+    NameServerCount = p->NameServerCount(p);
+    AdditionalCount = p->AdditionalCount(p);
+
+    i->Parser = p;
+    i->CurrentPosition = NULL;
+    i->RecordPosition = 0;
+
+    i->AllRecordCount = QuestionCount +
+                        AnswerCount +
+                        NameServerCount +
+                        AdditionalCount;
+
+    i->QuestionFirst = QuestionCount == 0 ? 0 : 1;
+    i->QuestionLast = i->QuestionFirst + QuestionCount - 1;
+
+    i->AnswerFirst = AnswerCount == 0 ?
+                     0 :
+                     i->QuestionFirst + QuestionCount;
+    i->AnswerLast = i->AnswerFirst + AnswerCount - 1;
+
+    i->NameServerFirst = NameServerCount == 0 ?
+                         0 :
+                         i->QuestionFirst +
+                             QuestionCount +
+                             AnswerCount;
+    i->NameServerLast = i->NameServerFirst + NameServerCount - 1;
+
+    i->AdditionalFirst = AdditionalCount == 0 ?
+                         0 :
+                         i->QuestionFirst +
+                             QuestionCount +
+                             AnswerCount +
+                             NameServerCount;
+    i->AdditionalLast = i->AdditionalFirst + AdditionalCount - 1;
+
+    i->Next = DnsSimpleParserIterator_Next;
+    i->GotoAnswers = DnsSimpleParserIterator_GotoAnswers;
+    i->GetName = DnsSimpleParserIterator_GetName;
+    i->GetNameLength = DnsSimpleParserIterator_GetNameLength;
+    i->RowData = DnsSimpleParserIterator_RowData;
+    i->TextifyData = DnsSimpleParserIterator_TextifyData;
+    i->GetTTL = DnsSimpleParserIterator_GetTTL;
+
+    return 0;
 }

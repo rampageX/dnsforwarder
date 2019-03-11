@@ -380,55 +380,9 @@ static Cht_Node *DNSCache_FindFromCache(char *Content, size_t Length, Cht_Node *
 
 }
 
-static char *DNSCache_GenerateTextFromRawRecord(const char *DNSBody, int DNSBodyLength, const char *DataBody, int DataLangth, char *Buffer, DNSRecordType ResourceType)
+static int DNSCache_AddAItemToCache(DnsSimpleParserIterator *i, time_t CurrentTime, const CtrlContent *InfectedTtlContent)
 {
-	int loop2;
-
-	const ElementDescriptor *Descriptor;
-	int DescriptorCount;
-
-	if(Buffer == NULL) return NULL;
-
-	DescriptorCount = DNSGetDescriptor(ResourceType, TRUE, &Descriptor);
-
-	if(DescriptorCount != 0)
-	{
-		char InnerBuffer[512];
-		DNSDataInfo Data;
-		for(loop2 = 0; loop2 != DescriptorCount; ++loop2)
-		{
-			Data = DNSParseData(DNSBody, DNSBodyLength, DataBody, DataLangth, InnerBuffer, sizeof(InnerBuffer), Descriptor, DescriptorCount, loop2 + 1);
-			switch(Data.DataType)
-			{
-				case DNS_DATA_TYPE_INT:
-					if(Data.DataLength == 1)Buffer += sprintf(Buffer, "%d", (int)*(char *)InnerBuffer);
-					if(Data.DataLength == 2)Buffer += sprintf(Buffer, "%d", (int)*(int16_t *)InnerBuffer);
-					if(Data.DataLength == 4)Buffer += sprintf(Buffer, "%u", *(int32_t *)InnerBuffer);
-					break;
-				case DNS_DATA_TYPE_UINT:
-					if(Data.DataLength == 1)Buffer += sprintf(Buffer, "%d", (int)*(unsigned char *)InnerBuffer);
-					if(Data.DataLength == 2)Buffer += sprintf(Buffer, "%d", (int)*(uint16_t *)InnerBuffer);
-					if(Data.DataLength == 4)Buffer += sprintf(Buffer, "%u", *(uint32_t *)InnerBuffer);
-					break;
-				case DNS_DATA_TYPE_STRING:
-					Buffer += sprintf(Buffer, "%s", InnerBuffer);
-					break;
-				default:
-					return NULL;
-					break;
-			}
-			*Buffer++ = '\0';
-		}
-
-		return Buffer;
-	} else {
-		return NULL;
-	}
-}
-
-static int DNSCache_AddAItemToCache(const char *DNSBody, int DNSBodyLength, const char *RecordBody, time_t CurrentTime, const CtrlContent *InfectedTtlContent)
-{
-	/* used to store cache data temporarily, no bounds checking here */
+	/* used to store cache data temporarily, TODO: no bounds checking here */
 	char			Buffer[512];
 	char			*HostName = Buffer + 1;
 
@@ -441,11 +395,12 @@ static int DNSCache_AddAItemToCache(const char *DNSBody, int DNSBodyLength, cons
 	Buffer[0] = CACHE_START;
 
 	/* Assign the name of the cache */
-	if( DNSGetHostName(DNSBody, DNSBodyLength, RecordBody, HostName, sizeof(Buffer) -1) < 0 )
+	if( i->GetName(i, HostName, sizeof(Buffer) -1) < 0 )
 	{
 		return -1;
 	}
 
+	/* Detemine which TTL scheme will be used */
 	if( InfectedTtlContent != NULL )
 	{
 		switch( InfectedTtlContent -> Infection )
@@ -471,20 +426,46 @@ static int DNSCache_AddAItemToCache(const char *DNSBody, int DNSBodyLength, cons
 		TtlContent = CacheTtlCrtl_Get(TtlCtrl, HostName);
 	}
 
-	/* Jump just over the name */
-	BufferItr += strlen(Buffer);
+	/* Jump just over the name, right at '\0' */
+	BufferItr = HostName + strlen(HostName);
+    if( BufferItr >= Buffer + sizeof(Buffer) )
+    {
+        return -2;
+    }
 
 	/* Set record type and class */
-	BufferItr += sprintf(BufferItr, "\1%d\1%d", (int)DNSGetRecordType(RecordBody), (int)DNSGetRecordClass(RecordBody));
+	BufferItr += snprintf(BufferItr,
+                          sizeof(Buffer) - (BufferItr - Buffer),
+                          "\1%d\1%d",
+                          i->Type,
+                          i->Klass
+                          );
+    if( BufferItr >= Buffer + sizeof(Buffer) )
+    {
+        return -3;
+    }
 
-	/* End of class */
+	/* End of name \1 type \1 class boundle */
 	*BufferItr++ = '\0';
+    if( BufferItr >= Buffer + sizeof(Buffer) )
+    {
+        return -4;
+    }
 
 	/* Generate data and store them */
-	BufferItr = DNSCache_GenerateTextFromRawRecord(DNSBody, DNSBodyLength, DNSGetResourceDataPos(RecordBody), DNSGetResourceDataLength(RecordBody), BufferItr, (DNSRecordType)DNSGetRecordType(RecordBody));
-
-	/* If it failed to generate data, stop everything else */
-	if(BufferItr == NULL) return 0;
+    if( i->TextifyData(i,
+                       "%v",
+                       BufferItr,
+                       sizeof(Buffer) - (BufferItr - Buffer)
+                       ) <= 0 )
+    {
+        return -5;
+    }
+	BufferItr += strlen(BufferItr) + 1;
+    if( BufferItr >= Buffer + sizeof(Buffer) )
+    {
+        return -6;
+    }
 
 	/* Mark the end */
 	*BufferItr = CACHE_END;
@@ -515,24 +496,17 @@ static int DNSCache_AddAItemToCache(const char *DNSBody, int DNSBodyLength, cons
 					break;
 
 				case TTL_STATE_ORIGINAL:
-					RecordTTL = DNSGetTTL(RecordBody);
+					RecordTTL = i->GetTTL(i);
 					break;
 
 				default:
-					RecordTTL = (TtlContent -> Coefficient) * DNSGetTTL(RecordBody) + (TtlContent -> Increment);
+					RecordTTL = (TtlContent -> Coefficient) * i->GetTTL(i) + (TtlContent -> Increment);
 					break;
 			}
 		} else {
-			RecordTTL = DNSGetTTL(RecordBody);
+			RecordTTL = i->GetTTL(i);
 		}
-/*
-		if(OverrideTTL < 0)
-		{
-			RecordTTL = DNSGetTTL(RecordBody) * TTLMultiple;
-		} else {
-			RecordTTL = OverrideTTL;
-		}
-*/
+
 		if( RecordTTL == 0 )
 		{
 			return 0;
@@ -566,145 +540,139 @@ static int DNSCache_AddAItemToCache(const char *DNSBody, int DNSBodyLength, cons
 
 int DNSCache_AddItemsToCache(char *DNSBody, int DNSBodyLength, time_t CurrentTime, const char *Domain)
 {
-	int loop;
-	int AnswerCount;
 	const CtrlContent *TtlContent = NULL;
+
+	DnsSimpleParser p;
+	DnsSimpleParserIterator i;
 
 	if(Inited == FALSE) return 0;
 
+	if( DnsSimpleParser_Init(&p, DNSBody, DNSBodyLength, FALSE) != 0 )
+    {
+        return -1;
+    }
+
+	if( DnsSimpleParserIterator_Init(&i, &p) != 0 )
+    {
+        return -2;
+    }
+
 	TtlContent =  CacheTtlCrtl_Get(TtlCtrl, Domain);
-	AnswerCount = DNSGetAnswerCount(DNSBody);
 	RWLock_WrLock(CacheLock);
 
-	for(loop = 1; loop != AnswerCount + 1; ++loop)
-	{
-		if( DNSCache_AddAItemToCache(DNSBody, DNSBodyLength, DNSGetAnswerRecordPosition(DNSBody, loop), CurrentTime, TtlContent) != 0 )
-		{
-			RWLock_UnWLock(CacheLock);
-			return -1;
-		}
-	}
+    while( i.Next(&i) != NULL )
+    {
+        BOOL RightPurpose = i.Purpose != DNS_RECORD_PURPOSE_UNKNOWN &&
+                            i.Purpose != DNS_RECORD_PURPOSE_QUESTION;
+
+        BOOL CachedType = i.Type == DNS_TYPE_A ||
+                          i.Type == DNS_TYPE_AAAA ||
+                          i.Type == DNS_TYPE_CNAME;
+
+        BOOL CachedClass = i.Klass == DNS_CLASS_IN;
+
+        if( RightPurpose && CachedType && CachedClass )
+        {
+            DNSCache_AddAItemToCache(&i, CurrentTime, TtlContent);
+        }
+    }
 
 	RWLock_UnWLock(CacheLock);
 
 	return 0;
 }
 
-static int DNSCache_GenerateDatasFromCache(	__in			char				*Datas,
-											__inout			char				*Buffer,
-											__in			int					BufferLength,
-											__in	const	ElementDescriptor	*Descriptor,
-											__in			int					CountOfDescriptor
+/* State code returned */
+static int DNSCache_GetRawRecordsFromCache(	__in    const char *Name,
+                                            __in    DNSRecordType Type,
+                                            __in    DNSRecordClass Klass,
+                                            __inout DnsGenerator *g,
+											__in	time_t CurrentTime
 											)
 {
-	int		TotleLength = 0;
-	int		SingleLength;
-	int		loop;
-
-	for(loop = 0; loop != CountOfDescriptor && *Datas != CACHE_END; ++loop)
-	{
-		SingleLength = DNSGenerateData(Datas, NULL, 0, Descriptor + loop);
-
-		if( BufferLength < SingleLength )
-		{
-			break;
-		}
-
-		DNSGenerateData(Datas, Buffer, SingleLength, Descriptor + loop);
-
-		TotleLength += SingleLength;
-		BufferLength -= SingleLength;
-		Buffer += SingleLength;
-
-		/* move to next record */
-		for(;*Datas != '\0'; ++Datas);
-		++Datas;
-	}
-
-	return TotleLength;
-}
-
-static int DNSCache_GetRawRecordsFromCache(	__in	char				*Name,
-											__in	DNSRecordType		Type,
-											__in	DNSRecordClass		Class,
-											__inout char				*Buffer,
-											__in	int					BufferLength,
-											__out	int					*RecordsLength,
-											__in	time_t				CurrentTime
-											)
-{
-	int			SingleLength;
-	char		*CacheItr;
-	Cht_Node	*Node = NULL;
-
-	int			DatasLen;
-
-	uint32_t	NewTTL;
-
-	int 		RecordCount = 0;
-
-	const ElementDescriptor *Descriptor;
-	int CountOfDescriptor;
+	int Ret = -100;
 
 	char Name_Type_Class[256];
 
-	*RecordsLength = 0;
+	uint32_t	NewTTL;
 
-	sprintf(Name_Type_Class, "%s\1%d\1%d", Name, Type, Class);
+    Cht_Node *Node = NULL; /* Important */
+
+    snprintf(Name_Type_Class,
+             sizeof(Name_Type_Class),
+             "%s\1%d\1%d",
+             Name,
+             Type,
+             Klass
+             );
 
 	do
 	{
-		Node = DNSCache_FindFromCache(Name_Type_Class, strlen(Name_Type_Class) + 1, Node, CurrentTime);
+        char *CacheItr;
+
+		Node = DNSCache_FindFromCache(Name_Type_Class,
+                                      strlen(Name_Type_Class) + 1,
+                                      Node,
+                                      CurrentTime
+                                      );
+
 		if( Node == NULL )
 		{
 			break;
 		}
 
+		Ret = 0;
+
 		if( Node -> TTL != 0 )
 		{
-			CountOfDescriptor = DNSGetDescriptor((DNSRecordType)Type, TRUE, &Descriptor);
-			if(CountOfDescriptor != 0)
-			{
-				++RecordCount;
+		    /* TTL*/
+            if( IgnoreTTL == TRUE )
+            {
+                NewTTL = Node -> TTL;
+            } else {
+                NewTTL = Node -> TTL - (CurrentTime - Node -> TimeAdded);
+            }
 
-				CacheItr = MapStart + Node -> Offset + 1;
+            /* Data */
+            for(CacheItr = MapStart + Node -> Offset + 1;
+                *CacheItr != '\0';
+                ++CacheItr
+            );
+            /* Now *CacheItr == '\0' */
+            ++CacheItr;
+            /* Now the data position */
 
-				SingleLength = DNSGenResourceRecord(NULL, 0, "a", Type, Class, 0, NULL, 0, FALSE);
+            switch( Type )
+            {
+            case DNS_TYPE_CNAME:
+                if( g->CName(g, Name, CacheItr, NewTTL) != 0 )
+                {
+                    return -1;
+                }
+                break;
 
-				if( BufferLength < SingleLength )
-				{
-					break;
-				}
+            case DNS_TYPE_A:
+                if( g->A(g, Name, CacheItr, NewTTL) != 0 )
+                {
+                    return -2;
+                }
+                break;
 
-				if( IgnoreTTL == TRUE )
-				{
-					NewTTL = Node -> TTL;
-				} else {
-					NewTTL = Node -> TTL - (CurrentTime - Node -> TimeAdded);
-				}
+            case DNS_TYPE_AAAA:
+                if( g->AAAA(g, Name, CacheItr, NewTTL) != 0 )
+                {
+                    return -3;
+                }
+                break;
 
-				DNSGenResourceRecord(Buffer, SingleLength, "a", Type, Class, NewTTL, NULL, 0, FALSE);
-
-				for(; *CacheItr != '\0'; ++CacheItr);
-				/* Then *CacheItr == '\0' */
-				++CacheItr;
-				/* Then the data position */
-
-				Buffer += SingleLength;
-				BufferLength -= SingleLength;
-
-				DatasLen = DNSCache_GenerateDatasFromCache(CacheItr, Buffer, BufferLength, Descriptor, CountOfDescriptor);
-
-				SET_16_BIT_U_INT(Buffer - 2, DatasLen);
-				Buffer += DatasLen;
-
-				(*RecordsLength) += (SingleLength + DatasLen);
-
-			}
+            default:
+                return -4;
+                break;
+            }
 		}
 	} while ( TRUE );
 
-	return RecordCount;
+    return Ret;
 }
 
 static Cht_Node *DNSCache_GetCNameFromCache(__in char *Name, __out char *Buffer, __in time_t CurrentTime)
@@ -712,7 +680,7 @@ static Cht_Node *DNSCache_GetCNameFromCache(__in char *Name, __out char *Buffer,
 	char Name_Type_Class[256];
 	Cht_Node *Node = NULL;
 
-	sprintf(Name_Type_Class, "%s\1%d\1%d", Name, DNS_TYPE_CNAME, 1);
+	snprintf(Name_Type_Class, sizeof(Name_Type_Class), "%s\1%d\1%d", Name, DNS_TYPE_CNAME, 1);
 
 	do
 	{
@@ -729,137 +697,159 @@ static Cht_Node *DNSCache_GetCNameFromCache(__in char *Name, __out char *Buffer,
 
 }
 
-static int DNSCache_GetByQuestion(__in const char *Question, __in int QuestionLength, __inout char *Buffer, __in int BufferLength, __out int *RecordsLength, __in time_t CurrentTime)
+/* State code returned */
+static int DNSCache_GetByQuestion(__inout DnsGenerator *g,
+                                  __inout DnsSimpleParser *p,
+                                  __in time_t CurrentTime
+                                  )
 {
-	int		SingleLength	=	0;
-	char	Name[260];
+   	char	Name[260];
 	char	CName[260];
 
-	Cht_Node *Node;
+    uint32_t NewTTL;
 
-	uint32_t	NewTTL;
+	DnsSimpleParserIterator i;
 
-	int		RecordsCount	=	0;
+	if( DnsSimpleParserIterator_Init(&i, p) != 0 )
+    {
+        return -1;
+    }
 
-	DNSRecordType	Type;
-	DNSRecordClass	Class;
+	if( i.Next(&i) == NULL || i.Purpose != DNS_RECORD_PURPOSE_QUESTION )
+    {
+        return -2;
+    }
 
-	if(Inited == FALSE) return -1;
+    if( i.Klass != DNS_CLASS_IN ||
+        (i.Type != DNS_TYPE_CNAME &&
+            i.Type != DNS_TYPE_A &&
+            i.Type != DNS_TYPE_AAAA
+            )
+        )
+    {
+        return -4;
+    }
 
-	*RecordsLength = 0;
+    if( i.GetName(&i, Name, sizeof(Name)) < 0 )
+    {
+        return -3;
+    }
 
-	if( DNSGetHostName(Question, QuestionLength, DNSJumpHeader(Question), Name, sizeof(Name)) < 0 )
-	{
-		return -1;
-	}
-
-	Type = (DNSRecordType)DNSGetRecordType(DNSJumpHeader(Question));
-	Class = (DNSRecordClass)DNSGetRecordClass(DNSJumpHeader(Question));
-
-
-	RWLock_RdLock(CacheLock);
+    RWLock_RdLock(CacheLock);
 
 	/* If the intended type is not DNS_TYPE_CNAME, then first find its cname */
-	if(Type != DNS_TYPE_CNAME)
-	{
-		while( (Node = DNSCache_GetCNameFromCache(Name, CName, CurrentTime)) != NULL )
+	if( i.Type != DNS_TYPE_CNAME )
+    {
+        Cht_Node *Node = NULL;
+		while( (Node = DNSCache_GetCNameFromCache(Name, CName, CurrentTime))
+               != NULL
+               )
 		{
-
-			SingleLength = DNSGenResourceRecord(NULL, 0, "a", DNS_TYPE_CNAME, 1, 0, CName, strlen(CName) + 1, TRUE);
-
-			if( BufferLength < SingleLength )
-			{
-			    RWLock_UnRLock(CacheLock);
-				return RecordsCount;
-			}
-
-			++RecordsCount;
-
 			if( IgnoreTTL == TRUE )
 			{
-				NewTTL = Node -> TTL;
+				NewTTL = Node->TTL;
 			} else {
-				NewTTL = Node -> TTL - (CurrentTime - Node -> TimeAdded);
+				NewTTL = Node->TTL - (CurrentTime - Node->TimeAdded);
 			}
 
-			DNSGenResourceRecord(Buffer, SingleLength, "a", DNS_TYPE_CNAME, 1, NewTTL, CName, strlen(CName) + 1, TRUE);
-
-			BufferLength -= SingleLength;
-			Buffer += SingleLength;
-
-			(*RecordsLength) += SingleLength;
+            if( g->CName(g, "a", CName, NewTTL) != 0 )
+            {
+                RWLock_UnRLock(CacheLock);
+                return -5;
+            }
 
 			strcpy(Name, CName);
 		}
-	}
+    }
 
-	RecordsCount += DNSCache_GetRawRecordsFromCache(Name, Type, Class, Buffer, BufferLength, &SingleLength, CurrentTime);
+    if( DNSCache_GetRawRecordsFromCache(Name, i.Type, i.Klass, g, CurrentTime)
+        != 0
+        )
+    {
+        RWLock_UnRLock(CacheLock);
+        return -6;
+    }
 
-	RWLock_UnRLock(CacheLock);
-
-	if( RecordsCount == 0 || SingleLength == 0 )
-	{
-		return 0;
-	}
-
-	(*RecordsLength) += SingleLength;
-
-	return RecordsCount;
+    RWLock_UnRLock(CacheLock);
+    return 0;
 }
 
+/* Content length returned */
 int DNSCache_FetchFromCache(char *RequestContent, int RequestLength, int BufferLength)
 {
-	BOOL	EDNSEnabled;
-	int		RecordsCount, RecordsLength;
+    DnsSimpleParser p;
+    BOOL	HasEdns;
 
-	if( Inited == FALSE )
+    DnsGenerator g;
+
+    char *HereToGenerate = RequestContent + RequestLength;
+    int LeftBufferLength = BufferLength - RequestLength;
+
+    int ResultLength;
+
+	if( Inited != TRUE )
 	{
-		return -1;
+		return -792;
 	}
 
-	switch( DNSRemoveEDNSPseudoRecord(RequestContent, &RequestLength) )
-	{
-		case EDNS_REMOVED:
-			EDNSEnabled = TRUE;
-			break;
+    if( DnsSimpleParser_Init(&p, RequestContent, RequestLength, FALSE) != 0 )
+    {
+        return -1;
+    }
 
-		case EDNS_NO_AR:
-			EDNSEnabled = FALSE;
-			break;
+    HasEdns = p.HasType(&p,
+                        DNS_RECORD_PURPOSE_ADDITIONAL,
+                        DNS_CLASS_UNKNOWN,
+                        DNS_TYPE_OPT
+                        );
 
-		default:
-			return -1;
-	}
+    if( DnsGenerator_Init(&g,
+                          HereToGenerate,
+                          LeftBufferLength,
+                          RequestContent,
+                          RequestLength,
+                          TRUE
+                          )
+       != 0)
+    {
+        return -2;
+    }
 
-	RecordsCount = DNSCache_GetByQuestion(RequestContent, RequestLength, RequestContent + RequestLength, BufferLength - RequestLength, &RecordsLength, time(NULL));
-	if( RecordsCount > 0 )
-	{
-		int UnCompressedLength = RequestLength + RecordsLength;
-		int CompressedLength;
+    if( g.NextPurpose(&g) != DNS_RECORD_PURPOSE_ANSWER )
+    {
+        return -5;
+    }
 
-		((DNSHeader *)RequestContent) -> AnswerCount = htons(RecordsCount);
+    if( DNSCache_GetByQuestion(&g, &p, time(NULL)) != 0 )
+    {
+        return -3;
+    }
 
-		CompressedLength = DNSCompress(RequestContent, UnCompressedLength);
+    g.Header->Flags.Direction = 1;
+    g.Header->Flags.AuthoritativeAnswer = 0;
+    g.Header->Flags.RecursionAvailable = 1;
+    g.Header->Flags.ResponseCode = 0;
+    g.Header->Flags.Type = 0;
 
-		((DNSHeader *)RequestContent) -> Flags.Direction = 1;
-		((DNSHeader *)RequestContent) -> Flags.AuthoritativeAnswer = 0;
-		((DNSHeader *)RequestContent) -> Flags.RecursionAvailable = 1;
-		((DNSHeader *)RequestContent) -> Flags.ResponseCode = 0;
-		((DNSHeader *)RequestContent) -> Flags.Type = 0;
+    if( HasEdns )
+    {
+        while( g.NextPurpose(&g) != DNS_RECORD_PURPOSE_ADDITIONAL );
+        if( g.EDns(&g, 1280) != 0 )
+        {
+            return -4;
+        }
+    }
 
-		if( EDNSEnabled == TRUE )
-		{
-			DNSAppendEDNSPseudoRecord(RequestContent, &CompressedLength);
-		}
+    /* g will no longer be needed, and can be crapped */
+    ResultLength = DNSCompress(HereToGenerate, g.Length(&g));
+    if( ResultLength < 0 )
+    {
+        return -6;
+    }
 
-		return CompressedLength;
-	} else {
-		if( EDNSEnabled == TRUE )
-		{
-			DNSAppendEDNSPseudoRecord(RequestContent, &RequestLength);
-		}
-		return -1;
-	}
+    memmove(RequestContent, HereToGenerate, ResultLength);
+
+    return ResultLength;
 }
 
 void DNSCacheClose(ConfigFileInfo *ConfigInfo)

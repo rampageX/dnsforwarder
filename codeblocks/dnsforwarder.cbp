@@ -69,10 +69,6 @@
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="../cachettlcrtl.h" />
-		<Unit filename="../checkip.c">
-			<Option compilerVar="CC" />
-		</Unit>
-		<Unit filename="../checkip.h" />
 		<Unit filename="../common.h" />
 		<Unit filename="../debug.c">
 			<Option compilerVar="CC" />
@@ -107,10 +103,6 @@
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="../excludedlist.h" />
-		<Unit filename="../extendablebuffer.c">
-			<Option compilerVar="CC" />
-		</Unit>
-		<Unit filename="../extendablebuffer.h" />
 		<Unit filename="../goodiplist.c">
 			<Option compilerVar="CC" />
 		</Unit>
@@ -127,6 +119,10 @@
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="../ipchunk.h" />
+		<Unit filename="../ipmisc.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="../ipmisc.h" />
 		<Unit filename="../linkedqueue.c">
 			<Option compilerVar="CC" />
 		</Unit>
@@ -171,6 +167,10 @@
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="../socketpool.h" />
+		<Unit filename="../stablebuffer.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="../stablebuffer.h" />
 		<Unit filename="../statichosts.c">
 			<Option compilerVar="CC" />
 		</Unit>

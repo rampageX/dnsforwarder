@@ -6,9 +6,9 @@
 	#include "config.h"
 #endif /* HAVE_CONFIG_H */
 
-/* There are some differeces between Linux and Windows.
- * For convenience, we defined something here to unify interfaces,
- * but it seems to be not very good. */
+/* There are many differeces between Linux and Windows.
+ * And we defined things here to unify interfaces,
+ * but it doesn't seem to be very good. */
 
 #ifdef WIN32 /* For Windows below. */
 
@@ -322,8 +322,8 @@
 	#define __inout_opt
 #endif /* __inout_opt */
 
-#define LENGTH_OF_IPV6_ADDRESS_ASCII	40
-#define LENGTH_OF_IPV4_ADDRESS_ASCII	16
+#define LENGTH_OF_IPV6_ADDRESS_ASCII	(sizeof("XXXX:XXXX:XXXX:XXXX:XXXX:XXXX:xxx.xxx.xxx.xxx"))
+#define LENGTH_OF_IPV4_ADDRESS_ASCII	(sizeof("xxx.xxx.xxx.xxx"))
 
 typedef union _CompatibleAddr{
 	struct sockaddr_in	Addr4;

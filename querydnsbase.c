@@ -17,23 +17,23 @@
 #include "domainstatistic.h"
 #include "request_response.h"
 
-void ShowRefusingMassage(const char *Agent, DNSRecordType Type, const char *Domain, const char *Massage)
+void ShowRefusingMessage(const char *Agent, DNSRecordType Type, const char *Domain, const char *Message)
 {
 	char DateAndTime[32];
 
-	if( ShowMassages == TRUE || DEBUGMODE )
+	if( ShowMessages == TRUE || DEBUGMODE )
 	{
 		GetCurDateAndTime(DateAndTime, sizeof(DateAndTime));
 	}
 
-	if( ShowMassages == TRUE )
+	if( ShowMessages == TRUE )
 	{
 		printf("%s[R][%s][%s][%s] %s.\n",
 			   DateAndTime,
 			   Agent,
 			   DNSGetTypeName(Type),
 			   Domain,
-			   Massage
+			   Message
 			   );
 	}
 
@@ -42,20 +42,20 @@ void ShowRefusingMassage(const char *Agent, DNSRecordType Type, const char *Doma
 			   Agent,
 			   DNSGetTypeName(Type),
 			   Domain,
-			   Massage
+			   Message
 			   );
 }
 
-void ShowTimeOutMassage(const char *Agent, DNSRecordType Type, const char *Domain, char Protocol)
+void ShowTimeOutMessage(const char *Agent, DNSRecordType Type, const char *Domain, char Protocol)
 {
 	char DateAndTime[32];
 
-	if( ShowMassages == TRUE || DEBUGMODE )
+	if( ShowMessages == TRUE || DEBUGMODE )
 	{
 		GetCurDateAndTime(DateAndTime, sizeof(DateAndTime));
 	}
 
-	if( ShowMassages == TRUE )
+	if( ShowMessages == TRUE )
 	{
 		printf("%s[%c][%s][%s][%s] Timed out.\n",
 			  DateAndTime,
@@ -75,7 +75,7 @@ void ShowTimeOutMassage(const char *Agent, DNSRecordType Type, const char *Domai
 			  );
 }
 
-void ShowErrorMassage(const char *Agent, DNSRecordType Type, const char *Domain, char ProtocolCharacter)
+void ShowErrorMessage(const char *Agent, DNSRecordType Type, const char *Domain, char ProtocolCharacter)
 {
 	char	DateAndTime[32];
 
@@ -116,14 +116,14 @@ void ShowErrorMassage(const char *Agent, DNSRecordType Type, const char *Domain,
 			   );
 }
 
-void ShowNormalMassage(const char *Agent, const char *RequestingDomain, const char *Package, int PackageLength, char ProtocolCharacter)
+void ShowNormalMessage(const char *Agent, const char *RequestingDomain, char *Package, int PackageLength, char ProtocolCharacter)
 {
 	DNSRecordType	Type = DNS_TYPE_UNKNOWN;
 
 	char DateAndTime[32];
 	char InfoBuffer[1024];
 
-	if( ShowMassages == TRUE || DEBUGMODE )
+	if( ShowMessages == TRUE || DEBUGMODE )
 	{
 		GetCurDateAndTime(DateAndTime, sizeof(DateAndTime));
 
@@ -133,7 +133,7 @@ void ShowNormalMassage(const char *Agent, const char *RequestingDomain, const ch
 		Type = (DNSRecordType)DNSGetRecordType(DNSJumpHeader(Package));
 	}
 
-	if( ShowMassages == TRUE )
+	if( ShowMessages == TRUE )
 	{
 		printf("%s[%c][%s][%s][%s] : %d bytes\n%s",
 			  DateAndTime,
@@ -157,12 +157,12 @@ void ShowNormalMassage(const char *Agent, const char *RequestingDomain, const ch
 			  );
 }
 
-void ShowBlockedMessage(const char *RequestingDomain, const char *Package, int PackageLength, const char *Message)
+void ShowBlockedMessage(const char *RequestingDomain, char *Package, int PackageLength, const char *Message)
 {
 	char DateAndTime[32];
 	char InfoBuffer[1024];
 
-	if( ShowMassages == TRUE || DEBUGMODE )
+	if( ShowMessages == TRUE || DEBUGMODE )
 	{
 		GetCurDateAndTime(DateAndTime, sizeof(DateAndTime));
 
@@ -170,7 +170,7 @@ void ShowBlockedMessage(const char *RequestingDomain, const char *Package, int P
 		GetAllAnswers(Package, PackageLength, InfoBuffer, sizeof(InfoBuffer));
 	}
 
-	if( ShowMassages == TRUE )
+	if( ShowMessages == TRUE )
 	{
 		printf("%s[B][%s] %s :\n%s", DateAndTime, RequestingDomain, Message == NULL ? "" : Message, InfoBuffer);
 	}
@@ -218,9 +218,9 @@ static int QueryFromServer(char *Content, int ContentLength, SOCKET ThisSocket)
 #define DNS_FETCH_FROM_HOSTS_OK	0
 #define DNS_FETCH_FROM_HOSTS_NONE_RESULT	(-1)
 #define DNS_FETCH_FROM_HOSTS_DISABLE_IPV6	(-2)
-static int DNSFetchFromHosts(char *Content, int ContentLength, SOCKET ThisSocket)
+static int DNSFetchFromHosts(char *Content, int ContentLength, int BufferLength, SOCKET ThisSocket)
 {
-	switch ( Hosts_Try(Content, &ContentLength) )
+	switch ( Hosts_Try(Content, &ContentLength, BufferLength) )
 	{
 		case MATCH_STATE_NONE:
 		case MATCH_STATE_DISABLED:
@@ -262,14 +262,14 @@ int QueryBase(char *Content, int ContentLength, int BufferLength, SOCKET ThisSoc
 	if( IsDisabledType(Header -> RequestingType) )
 	{
 		DomainStatistic_Add(Header -> RequestingDomain, &(Header -> RequestingDomainHashValue), STATISTIC_TYPE_REFUSED);
-		ShowRefusingMassage(Header -> Agent, Header -> RequestingType, Header -> RequestingDomain, "Disabled type");
+		ShowRefusingMessage(Header -> Agent, Header -> RequestingType, Header -> RequestingDomain, "Disabled type");
 		return QUERY_RESULT_DISABLE;
 	}
 
 	if( IsDisabledDomain(Header -> RequestingDomain, &(Header -> RequestingDomainHashValue)) )
 	{
 		DomainStatistic_Add(Header -> RequestingDomain, &(Header -> RequestingDomainHashValue), STATISTIC_TYPE_REFUSED);
-		ShowRefusingMassage(Header -> Agent, Header -> RequestingType, Header -> RequestingDomain, "Disabled domain");
+		ShowRefusingMessage(Header -> Agent, Header -> RequestingType, Header -> RequestingDomain, "Disabled domain");
 		return QUERY_RESULT_DISABLE;
 	}
 
@@ -277,27 +277,27 @@ int QueryBase(char *Content, int ContentLength, int BufferLength, SOCKET ThisSoc
 	if( DNSGetQuestionCount(RequestEntity) == 1 )
 	{
 		/* First query from hosts and cache */
-		StateOfReceiving = DNSFetchFromHosts(Content, ContentLength, ThisSocket);
+		StateOfReceiving = DNSFetchFromHosts(Content, ContentLength, BufferLength, ThisSocket);
 
 		if( StateOfReceiving == DNS_FETCH_FROM_HOSTS_NONE_RESULT )
 		{
 			StateOfReceiving = DNSCache_FetchFromCache(RequestEntity, ContentLength - sizeof(ControlHeader), BufferLength - sizeof(ControlHeader));
 			if( StateOfReceiving > 0 )
 			{
-				ShowNormalMassage(Header -> Agent, Header -> RequestingDomain, RequestEntity, StateOfReceiving, 'C');
+				ShowNormalMessage(Header -> Agent, Header -> RequestingDomain, RequestEntity, StateOfReceiving, 'C');
 				DomainStatistic_Add(Header -> RequestingDomain, &(Header -> RequestingDomainHashValue), STATISTIC_TYPE_CACHE);
 				return StateOfReceiving;
 			}
 		} else if( StateOfReceiving == DNS_FETCH_FROM_HOSTS_DISABLE_IPV6 )
 		{
 			DomainStatistic_Add(Header -> RequestingDomain, &(Header -> RequestingDomainHashValue), STATISTIC_TYPE_REFUSED);
-			ShowRefusingMassage(Header -> Agent, Header -> RequestingType, Header -> RequestingDomain, "Disabled by hosts");
+			ShowRefusingMessage(Header -> Agent, Header -> RequestingType, Header -> RequestingDomain, "Disabled by hosts");
 			return QUERY_RESULT_DISABLE;
 		} else {
 			DomainStatistic_Add(Header -> RequestingDomain, &(Header -> RequestingDomainHashValue), STATISTIC_TYPE_HOSTS);
 			if( StateOfReceiving > 0 )
 			{
-				ShowNormalMassage(Header -> Agent,
+				ShowNormalMessage(Header -> Agent,
 									Header -> RequestingDomain,
 									RequestEntity,
 									StateOfReceiving - sizeof(ControlHeader),

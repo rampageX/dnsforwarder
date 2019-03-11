@@ -1,4 +1,5 @@
 #include <string.h>
+#include "utils.h"
 #include "ipchunk.h"
 
 static int Compare(IpElement *_1, IpElement *_2)
@@ -19,14 +20,20 @@ static int Compare(IpElement *_1, IpElement *_2)
 int IpChunk_Init(IpChunk *ic)
 {
 	IpElement	Root;
-	Root.IpLength = 10;
+	Root.IpLength = 10; /* 4 < 10 < 16 */
 
-	if( Bst_Init(&(ic -> Chunk), NULL, sizeof(IpElement), (int (*)(const void *, const void *))Compare) != 0 )
+	if( Bst_Init(&(ic -> Chunk),
+                 NULL,
+                 sizeof(IpElement),
+                 (int (*)(const void *, const void *))Compare
+                )
+       != 0
+       )
 	{
 		return -1;
 	}
 
-	if( ExtendableBuffer_Init(&(ic -> Datas), 0, -1) != 0 )
+	if( StableBuffer_Init(&(ic -> Datas)) != 0 )
 	{
         Array_Free(ic -> Chunk.Nodes);
 		return -1;
@@ -37,35 +44,81 @@ int IpChunk_Init(IpChunk *ic)
 
 int IpChunk_Add(IpChunk *ic, uint32_t Ip, int Type, const char *Data, uint32_t DataLength)
 {
+    StableBuffer *sb = &(ic->Datas);
+
 	IpElement	New;
 	New.IpLength = 4;
 	New.Ip.Ipv4 = Ip;
 	New.Type = Type;
-	New.DataOffset = -1;
+	New.Data = NULL;
 
 	if( Data != NULL )
 	{
-		New.DataOffset = ExtendableBuffer_Add(&(ic -> Datas), Data, DataLength);
+		New.Data = sb->Add(sb, Data, DataLength);
 	}
 
 	return Bst_Add(&(ic -> Chunk), &New);
 }
 
+int IpChunk_AddFromString(IpChunk *ic,
+                          const char *Ip,
+                          int Type,
+                          const char *Data,
+                          uint32_t DataLength
+                          )
+{
+    uint32_t    IpNum = 0;
+
+    IPv4AddressToNum(Ip, &IpNum);
+
+    return IpChunk_Add(ic, IpNum, Type, Data, DataLength);
+}
+
 int IpChunk_Add6(IpChunk *ic, const char *Ipv6, int Type, const char *Data, uint32_t DataLength)
 {
-	IpElement	New;
+    StableBuffer *sb = &(ic->Datas);
 
+	IpElement	New;
 	New.IpLength = 16;
 	memcpy(New.Ip.Ipv6, Ipv6, 16);
 	New.Type = Type;
-	New.DataOffset = -1;
+	New.Data = NULL;
 
 	if( Data != NULL )
 	{
-		New.DataOffset = ExtendableBuffer_Add(&(ic -> Datas), Data, DataLength);
+		New.Data = sb->Add(sb, Data, DataLength);
 	}
 
 	return Bst_Add(&(ic -> Chunk), &New);
+}
+
+int IpChunk_Add6FromString(IpChunk *ic,
+                           const char *Ip,
+                           int Type,
+                           const char *Data,
+                           uint32_t DataLength
+                           )
+{
+    char	IpNum[16];
+
+    IPv6AddressToNum(Ip, IpNum);
+
+    return IpChunk_Add6(ic, IpNum, Type, Data, DataLength);
+}
+
+int IpChunk_AddAnyFromString(IpChunk *ic,
+                             const char *Ip,
+                             int Type,
+                             const char *Data,
+                             uint32_t DataLength
+                             )
+{
+    if( strchr(Ip, ':') != NULL )
+    {
+        return IpChunk_Add6FromString(ic, Ip, Type, Data, DataLength);
+    } else {
+        return IpChunk_AddFromString(ic, Ip, Type, Data, DataLength);
+    }
 }
 
 BOOL IpChunk_Find(IpChunk *ic, uint32_t Ip, int *Type, const char **Data)
@@ -81,7 +134,7 @@ BOOL IpChunk_Find(IpChunk *ic, uint32_t Ip, int *Type, const char **Data)
 	Key.IpLength = 4;
 	Key.Ip.Ipv4 = Ip;
 	Key.Type = 0;
-	Key.DataOffset = -1;
+	Key.Data = NULL;
 
 	Result = Bst_Search(&(ic -> Chunk), &Key, NULL);
 
@@ -102,12 +155,7 @@ BOOL IpChunk_Find(IpChunk *ic, uint32_t Ip, int *Type, const char **Data)
 
 			if( Data != NULL )
 			{
-				if( IpResult -> DataOffset < 0 )
-				{
-					*Data = NULL;
-				} else {
-					*Data = ExtendableBuffer_GetPositionByOffset(&(ic -> Datas), IpResult -> DataOffset);
-				}
+                *Data = IpResult->Data;
 			}
 		}
 
@@ -128,7 +176,7 @@ BOOL IpChunk_Find6(IpChunk *ic, const char *Ipv6, int *Type, const char **Data)
 	Key.IpLength = 16;
 	memcpy(Key.Ip.Ipv6, Ipv6, 16);
 	Key.Type = 0;
-	Key.DataOffset = -1;
+	Key.Data = NULL;
 
 	Result = Bst_Search(&(ic -> Chunk), &Key, NULL);
 
@@ -149,12 +197,7 @@ BOOL IpChunk_Find6(IpChunk *ic, const char *Ipv6, int *Type, const char **Data)
 
 			if( Data != NULL )
 			{
-				if( IpResult -> DataOffset < 0 )
-				{
-					*Data = NULL;
-				} else {
-					*Data = ExtendableBuffer_GetPositionByOffset(&(ic -> Datas), IpResult -> DataOffset);
-				}
+                *Data = IpResult->Data;
 			}
 		}
 
